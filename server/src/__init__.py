@@ -1,16 +1,20 @@
 """
-Incremental RAG System - A production-ready RAG with document versioning
+Codebase RAG backend package.
 """
 
-from .rag_system import IncrementalRAGSystem
+from .code_parser import CodeParser
 from .embeddings import EmbeddingGenerator
-from .vector_store import FAISSVectorStore
-from .document_processor import DocumentProcessor
+from .hybrid_search import HybridSearchEngine
+from .rag_system import CodebaseRAGSystem
+from .repo_fetcher import RepoFetcher
+from .vector_store import QdrantVectorStore
 
-__version__ = "1.0.0"
+__version__ = "2.0.0"
 __all__ = [
-    "IncrementalRAGSystem",
+    "CodeParser",
+    "CodebaseRAGSystem",
     "EmbeddingGenerator",
-    "FAISSVectorStore",
-    "DocumentProcessor",
+    "QdrantVectorStore",
+    "HybridSearchEngine",
+    "RepoFetcher",
 ]

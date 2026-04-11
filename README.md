@@ -1,78 +1,303 @@
-# Multi-Version Document Q&A with RAG
+# Code Compass
 
-A RAG system with built-in version control enabling semantic search and natural language Q&A across document revision history.
+An end-to-end repository question answering system that indexes a public GitHub codebase, retrieves grounded code evidence, and generates cited answers through a retrieval-augmented generation pipeline.
 
-[![Live Demo](https://img.shields.io/badge/demo-live-success)](https://www.sivasanker.com/projects/document-qa-rag)
+This project includes:
+- a React frontend for repository submission and conversational querying
+- a FastAPI backend for indexing and answering questions
+- a hybrid retrieval pipeline with semantic search, BM25, and reranking
+- an evaluation harness for measuring retrieval quality and answer grounding
 
-![Project UI](./ui/public/imgs/1.jpeg)
+## Why This Project Matters
 
-![Project Diff UI](./ui/public/imgs/2.jpeg)
+Strong applied AI projects usually show:
+- clear system design
+- practical backend and frontend integration
+- retrieval and ranking logic beyond a single prompt
+- measurable evaluation instead of anecdotal demos
+- thoughtful tradeoffs around cost, latency, and persistence
 
-![Project Switch Doc UI](./ui/public/imgs/3.jpeg)
+Code Compass brings those elements together in one end-to-end application.
 
-![Project Add Doc UI](./ui/public/imgs/4.jpeg)
+## What The System Does
 
-## Overview
+1. A user pastes a GitHub repository URL into the UI.
+2. The backend clones the repository into a temporary local directory.
+3. Source files are filtered and chunked using tree-sitter and fallback text chunking.
+4. The system generates embeddings for chunks and stores them in a Qdrant-backed vector layer.
+5. At query time, the system retrieves evidence with:
+   - semantic vector search
+   - lexical BM25 search
+   - reciprocal rank fusion
+   - cross-encoder reranking
+6. The top grounded chunks are passed to the LLM to generate a concise answer.
+7. The UI displays the answer with file-level citations and GitHub source links.
 
-Solves document version tracking by implementing version-aware semantic search. Unlike traditional RAG systems that only support current versions, this system maintains complete document history with temporal querying capabilities.
+## App Screens
 
-### Key Features
 
-- **Version Control:** Query any historical version ("What did v3 say about remote work?")
-- **Temporal Comparison:** Compare any two versions with automated change detection
-- **Incremental Indexing:** O(1) version additions without index rebuilds
-- **LLM Integration:** Natural language answers via Llama 3.3-70B (Groq API)
-- **Change Detection:** Automatic classification of modified/added/removed content
+![Code Compass landing screen](images/landing.png)
 
----
 
-## Tech Stack
-
-- **Backend:** FastAPI, FAISS, Sentence Transformers, SQLAlchemy, Groq API
-- **Frontend:** React
-- **Deployment:** Hugging Face Spaces (backend API), Vercel (frontend)
-- **Containerization:** Docker
-
----
+![Code Compass chat and citations screen](images/chat.png)
 
 ## Architecture
 
+```text
+┌──────────────────────┐
+│      React UI        │
+│  repo submit + chat  │
+│  citations + status  │
+└──────────┬───────────┘
+           │ HTTP / JSON
+           ▼
+┌──────────────────────┐
+│    FastAPI Server    │
+│   routes + session   │
+│      validation      │
+└──────────┬───────────┘
+           │
+           ▼
+┌──────────────────────────────────────────────┐
+│              CodebaseRAGSystem               │
+│ indexing orchestration + query orchestration │
+└───────┬───────────────┬───────────────┬──────┘
+        │               │               │
+        │               │               │
+        ▼               ▼               ▼
+┌──────────────┐  ┌──────────────┐  ┌──────────────┐
+│ RepoFetcher  │  │ CodeParser   │  │ Embeddings   │
+│ clone/filter │  │ tree-sitter  │  │ Vertex/local │
+└──────┬───────┘  │ fallback     │  └──────┬───────┘
+       │          └──────┬───────┘         │
+       │                 │                 │
+       └────────────┬────┴────────────┬────┘
+                    ▼                 ▼
+           ┌──────────────┐   ┌──────────────┐
+           │ SQLite       │   │ Qdrant       │
+           │ repo/status  │   │ vector store │
+           │ metadata     │   └──────┬───────┘
+           └──────────────┘          │
+                                     ▼
+                           ┌──────────────────┐
+                           │ Hybrid Retrieval │
+                           │ semantic + BM25  │
+                           │ + reranking      │
+                           └────────┬─────────┘
+                                    ▼
+                           ┌──────────────────┐
+                           │   LLM Answerer   │
+                           │ grounded answer  │
+                           │ + citations      │
+                           └──────────────────┘
 ```
-React Frontend (Vercel)
-    ↓ HTTPS
-FastAPI Backend (Hugging Face Spaces / Docker)
-    ↓
-[SQLite] [FAISS Index] [Groq LLM]
-```
 
-### Core Components
+### Frontend
 
-1. **Document Processor:** Extracts text, chunks (512 chars, 50 overlap)
-2. **Embeddings:** Sentence Transformers (all-MiniLM-L6-v2, 384 dims)
-3. **Vector Store:** FAISS with incremental indexing
-4. **Version Metadata:** SQLAlchemy ORM (Document, Version, Chunk tables)
-5. **LLM Integration:** Groq API for answer generation
+- React 19
+- Tailwind CSS
+- Axios for API communication
 
----
+Responsibilities:
+- collect the GitHub repository URL
+- poll indexing state
+- send chat questions and prior conversation turns
+- render markdown-like answers
+- display cited files, symbols, and line ranges
 
-## Installation
+Main entry points:
+- [`ui/src/App.js`](/Users/sivasankernp/Desktop/document-qa-rag-system/ui/src/App.js)
+- [`ui/src/config.js`](/Users/sivasankernp/Desktop/document-qa-rag-system/ui/src/config.js)
 
-### Backend Setup (Local)
+### Backend
+
+- FastAPI
+- Pydantic
+- SQLAlchemy
+- SQLite for lightweight repository metadata
+
+Responsibilities:
+- validate requests
+- manage session-scoped repository state
+- run indexing in the background
+- execute retrieval and answer generation
+- return grounded answers and source metadata
+
+Main entry points:
+- [`server/server_app.py`](/Users/sivasankernp/Desktop/document-qa-rag-system/server/server_app.py)
+- [`server/src/rag_system.py`](/Users/sivasankernp/Desktop/document-qa-rag-system/server/src/rag_system.py)
+
+### Retrieval Pipeline
+
+- tree-sitter for code-aware chunking
+- Vertex AI or local embeddings for semantic retrieval
+- BM25 for lexical retrieval
+- reciprocal rank fusion to combine retrieval channels
+- a cross-encoder reranker for final source ordering
+- Gemini or Groq-backed LLM generation depending on environment configuration
+
+Core modules:
+- [`server/src/code_parser.py`](/Users/sivasankernp/Desktop/document-qa-rag-system/server/src/code_parser.py)
+- [`server/src/embeddings.py`](/Users/sivasankernp/Desktop/document-qa-rag-system/server/src/embeddings.py)
+- [`server/src/hybrid_search.py`](/Users/sivasankernp/Desktop/document-qa-rag-system/server/src/hybrid_search.py)
+- [`server/src/vector_store.py`](/Users/sivasankernp/Desktop/document-qa-rag-system/server/src/vector_store.py)
+- [`server/src/repo_fetcher.py`](/Users/sivasankernp/Desktop/document-qa-rag-system/server/src/repo_fetcher.py)
+
+## Data Flow
+
+### Indexing Flow
+
+1. `POST /api/repos/index`
+2. Backend registers the repo against a session
+3. Background task clones the repo
+4. Files are filtered by extension, directory, and size
+5. Files are chunked into code-aware segments
+6. Embeddings are generated for each chunk
+7. Chunks are stored in the vector layer and in in-memory retrieval state
+8. Metadata and progress are exposed back to the UI
+
+### Query Flow
+
+1. `POST /api/query`
+2. The backend validates the session and repository status
+3. The question is expanded using lightweight intent heuristics
+4. Semantic search retrieves candidate chunks
+5. BM25 retrieves lexical matches
+6. Results are fused and reranked
+7. Final sources are selected and passed to the LLM
+8. The backend returns:
+   - `answer`
+   - `confidence`
+   - `sources`
+   - repository metadata
+
+## Tech Stack Decisions
+
+### Why FastAPI
+
+- fast iteration speed
+- strong request validation through Pydantic
+- simple background task support
+- clean fit for JSON APIs and model-driven backend code
+
+### Why React
+
+- straightforward stateful UI for a single-page workflow
+- easy integration with polling, chat state, and citation rendering
+- strong ecosystem for incremental iteration
+
+### Why tree-sitter
+
+- better chunk boundaries than naive fixed-length splitting
+- lets the system reason around functions, classes, and symbols
+- improves retrieval quality for implementation-focused questions
+
+### Why Hybrid Retrieval
+
+Pure semantic search misses exact symbols and file names. Pure lexical search misses semantic intent. This project combines both because code questions often need:
+- exact identifiers
+- nearby implementation detail
+- cross-file semantic similarity
+
+### Why Qdrant
+
+- simple vector abstraction
+- local in-memory mode for fast demos
+- cloud-compatible path for later deployment
+
+### Why SQLite
+
+- enough for lightweight repository/session metadata
+- very low operational overhead
+- matches the project goal of staying simple while preserving useful state
+
+## Evaluation And Benchmarking
+
+The project includes an end-to-end eval harness that calls the live API instead of mocking the retrieval pipeline.
+
+Files:
+- [`server/evals/run_eval.py`](/Users/sivasankernp/Desktop/document-qa-rag-system/server/evals/run_eval.py)
+- [`server/evals/sample_eval_set.json`](/Users/sivasankernp/Desktop/document-qa-rag-system/server/evals/sample_eval_set.json)
+
+The benchmark currently measures:
+- retrieval hit rate
+- top-1 hit rate
+- mean reciprocal rank
+- source recall
+- duplicate source rate
+- keyword-based answer checks
+- grounded answer rate
+- optional RAGAS judge metrics such as faithfulness and answer relevancy
+
+The project includes a measurable end-to-end evaluation workflow alongside the product itself.
+
+### Benchmark Snapshot
+
+Latest expanded internal benchmark:
+- 37 evaluation cases
+- 8 categories
+- 4 multi-turn conversation cases
+
+Headline metrics from the current benchmark run:
+
+| Metric | Result |
+| --- | ---: |
+| Retrieval hit rate | 95.0% |
+| Top-1 hit rate | 75.0% |
+| Mean reciprocal rank | 0.85 |
+| Source recall | 74.2% |
+| Faithfulness (RAGAS) | 0.917 |
+| Answer relevancy (RAGAS) | 0.843 |
+| Context precision (RAGAS) | 0.767 |
+
+What these numbers mean:
+- the system retrieves at least one relevant source for the large majority of benchmark cases
+- the first-ranked source is relevant in most cases, with the biggest remaining opportunity in canonical file ranking for harder prompts
+- the benchmark includes architecture, API, setup, docs, tests, cross-file, and conversation-style questions
+- the evaluation provides a solid engineering benchmark for the current system and repo scope
+
+Benchmark strengths:
+- strong retrieval on architecture and setup questions
+- grounded answers with source-linked citations
+- measurable end-to-end performance instead of anecdotal examples
+
+Benchmark-exposed weaknesses:
+- duplicate source retrieval still appears in some cases
+- some cross-file and test-heavy questions remain harder than single-file API questions
+- canonical implementation files are not always ranked first on the hardest prompts
+
+## Project Strengths
+
+- full-stack architecture with a clear data flow
+- code-aware retrieval rather than plain document retrieval
+- practical hybrid search design
+- session-aware repo isolation
+- source-grounded answer generation
+- explicit benchmark and evaluation workflow
+
+## Known Tradeoffs
+
+- retrieval state is intentionally session-scoped and mostly in memory
+- cloned repositories are temporary and deleted after indexing
+- repository metadata is lightweight and persisted separately from vector state
+- if the backend restarts, repositories must be re-indexed
+- the benchmark is strong for the current project scope and can be expanded further across repositories over time
+
+## Local Setup
+
+### Backend
 
 ```bash
 cd server
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-
-export GROQ_API_KEY=YOUR_GROQ_API_KEY
-
 python server_app.py
 ```
 
-Runs at `http://localhost:8000`
+Backend runs on `http://localhost:8000`
 
-### Frontend Setup
+### Frontend
 
 ```bash
 cd ui
@@ -80,131 +305,47 @@ npm install
 npm start
 ```
 
-Runs at `http://localhost:3000`
+Frontend runs on `http://localhost:3000`
 
----
-
-## API Endpoints
-
-### Upload Document
+Create `ui/.env`:
 
 ```bash
-POST /api/documents/upload
-Content-Type: multipart/form-data
-
-file: [PDF/TXT/DOCX]
-doc_name: "policy"
+REACT_APP_API_URL=http://localhost:8000
 ```
 
-### Query
+## Running The Eval Harness
+
+From the `server` directory:
 
 ```bash
-POST /api/query/generate
-{
-  "question": "What is the remote work policy?",
-  "version_id": 2,
-  "k": 5
-}
+CODEBASE_RAG_API_URL=http://localhost:8000 \
+CODEBASE_RAG_SESSION_ID=<session-id> \
+CODEBASE_RAG_REPO_ID=<repo-id> \
+CODEBASE_RAG_EVAL_OUTPUT=evals/latest_eval_report.json \
+python evals/run_eval.py
 ```
 
-### Compare Versions
+The output report includes:
+- eval-set audit warnings
+- headline metrics
+- category breakdowns
+- case-by-case detail
+- a summary string suitable for project reporting
+
+If you want to save the latest run as a JSON artifact:
 
 ```bash
-POST /api/compare/detailed
-{
-  "question": "What changed?",
-  "version_id_1": 1,
-  "version_id_2": 2
-}
+CODEBASE_RAG_EVAL_OUTPUT=evals/latest_eval_report.json
 ```
 
-### List Versions
+## Repository Structure
 
-```bash
-GET /api/documents/{doc_name}/versions
+```text
+server/
+  server_app.py
+  evals/
+  src/
+ui/
+  src/
+README.md
 ```
-
----
-
-## How It Works
-
-### 1. Document Upload
-
-- Extract text (PyPDF, python-docx)
-- Chunk text (512 chars, 50 overlap)
-- Generate embeddings (Sentence Transformers)
-- Store in FAISS (incremental add) + SQLite (metadata)
-
-### 2. Query
-
-- Generate question embedding
-- FAISS similarity search (filter by version_id)
-- LLM generates answer from retrieved chunks
-
-### 3. Version Comparison
-
-- Query both versions
-- Calculate chunk-level cosine similarity
-- Classify changes (modified/added/removed)
-- LLM summarizes differences
-
----
-
-## Project Structure
-
-```
-├── server/
-│   ├── src/
-│   │   ├── database.py           # SQLAlchemy models
-│   │   ├── embeddings.py         # Sentence Transformers wrapper
-│   │   ├── vector_store.py       # FAISS operations
-│   │   ├── document_processor.py # Text extraction & chunking
-│   │   └── rag_system.py         # Main orchestrator
-│   ├── server_app.py             # FastAPI application
-│   └── requirements.txt
-│
-└── ui/
-    ├── public/
-    ├── src/
-    │   └── components/
-    │   ├── App.js
-    │   ├── config.js
-    │   ├── index.js
-    └── package.json
-```
-
----
-
-## Deployment
-
-### Hugging Face Spaces (Backend)
-
-This project is deployed on **Hugging Face Spaces** using the **Docker Space SDK** on the free CPU tier.
-
-**Space URL:** https://technophyle-doc-qa.hf.space/
-
-**Deployment details**
-
-- **Space SDK:** Docker
-- **Runtime:** FastAPI (Uvicorn)
-- **Containerization:** Docker
-- **Hardware:** Free CPU
-
-**Required environment variables:** GROQ_API_KEY
-
-### Vercel (Frontend)
-
-```
-Framework: React
-```
-
----
-
-## Use Cases
-
-- **Policy Tracking:** Track changes in HR policies, contracts, regulations
-- **Compliance:** Audit document revisions with searchable history
-- **Legal:** Compare contract versions, track amendments
-- **Knowledge Management:** Maintain evolving documentation with temporal queries
-
----

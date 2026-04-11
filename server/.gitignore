@@ -212,3 +212,5 @@ data/
 rag_system.db
 
 test_demo.py
+
+codebase_rag.db

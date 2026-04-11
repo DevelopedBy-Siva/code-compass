@@ -1,0 +1,673 @@
+[
+  {
+    "id": "sqlmodel-purpose",
+    "category": "architecture",
+    "question": "What is SQLModel and how is it positioned relative to Pydantic and SQLAlchemy?",
+    "ground_truth": "SQLModel is a thin layer designed to combine Pydantic-style data modeling with SQLAlchemy ORM and SQL expression features. The project presents itself as a library for SQL databases in Python that emphasizes simplicity, compatibility, and robustness while being built on top of Pydantic and SQLAlchemy.",
+    "expected_sources": [
+      "README.md",
+      "sqlmodel/__init__.py",
+      "sqlmodel/main.py"
+    ],
+    "must_include_any": [
+      "Pydantic",
+      "SQLAlchemy",
+      "thin layer"
+    ],
+    "min_keyword_matches": 2
+  },
+  {
+    "id": "sqlmodel-core-model-class",
+    "category": "architecture",
+    "question": "Where is the core SQLModel base class defined and what is its role?",
+    "ground_truth": "The SQLModel base class is defined in sqlmodel/main.py. It acts as the main model base that bridges typed field definitions, Pydantic-compatible validation behavior, and SQLAlchemy table or ORM metadata.",
+    "expected_sources": [
+      "sqlmodel/main.py"
+    ],
+    "must_include_any": [
+      "SQLModel",
+      "base class",
+      "Pydantic",
+      "SQLAlchemy"
+    ],
+    "min_keyword_matches": 2
+  },
+  {
+    "id": "sqlmodel-field-helper",
+    "category": "architecture",
+    "question": "How does SQLModel expose field declarations for model attributes?",
+    "ground_truth": "SQLModel exposes a Field helper in sqlmodel/main.py and re-exports it at the package level. Field collects model metadata such as defaults, primary key flags, indexes, foreign keys, nullability, and other column-related settings used when building SQL-backed models.",
+    "expected_sources": [
+      "sqlmodel/main.py",
+      "sqlmodel/__init__.py"
+    ],
+    "must_include_any": [
+      "Field",
+      "primary key",
+      "foreign key",
+      "re-export"
+    ],
+    "min_keyword_matches": 2
+  },
+  {
+    "id": "sqlmodel-relationship-helper",
+    "category": "architecture",
+    "question": "How are relationships modeled in SQLModel?",
+    "ground_truth": "Relationships are declared through the Relationship helper and associated metadata in sqlmodel/main.py. SQLModel captures relationship configuration separately from normal field definitions so relationship behavior can be translated into SQLAlchemy ORM relationship setup.",
+    "expected_sources": [
+      "sqlmodel/main.py",
+      "sqlmodel/__init__.py"
+    ],
+    "must_include_any": [
+      "Relationship",
+      "relationship",
+      "SQLAlchemy",
+      "metadata"
+    ],
+    "min_keyword_matches": 2
+  },
+  {
+    "id": "sqlmodel-field-function",
+    "category": "specific-function",
+    "question": "What does the Field() function do in SQLModel?",
+    "ground_truth": "Field defines metadata for a model attribute, including validation defaults and SQL column configuration such as primary_key, foreign_key, index, nullable, sa_type, or sa_column options. SQLModel uses that metadata when constructing models that can also map to tables.",
+    "expected_sources": [
+      "sqlmodel/main.py"
+    ],
+    "must_include_any": [
+      "Field",
+      "primary_key",
+      "nullable",
+      "column"
+    ],
+    "min_keyword_matches": 2
+  },
+  {
+    "id": "sqlmodel-relationship-function",
+    "category": "specific-function",
+    "question": "What does Relationship() do in SQLModel?",
+    "ground_truth": "Relationship captures relationship-specific configuration for ORM links between models, such as back_populates and SQLAlchemy relationship arguments. It provides structured metadata that SQLModel can later translate into SQLAlchemy relationship objects.",
+    "expected_sources": [
+      "sqlmodel/main.py"
+    ],
+    "must_include_any": [
+      "Relationship",
+      "back_populates",
+      "relationship",
+      "metadata"
+    ],
+    "min_keyword_matches": 2
+  },
+  {
+    "id": "sqlmodel-session-exec",
+    "category": "specific-function",
+    "question": "What is special about Session.exec() in SQLModel?",
+    "ground_truth": "SQLModel provides a Session class with an exec helper that offers a friendlier typed wrapper around SQLAlchemy execution patterns, especially for SQLModel select statements. It is intended to make common query execution more ergonomic than raw SQLAlchemy session.execute calls.",
+    "expected_sources": [
+      "sqlmodel/orm/session.py",
+      "sqlmodel/__init__.py"
+    ],
+    "must_include_any": [
+      "Session",
+      "exec",
+      "execute",
+      "typed"
+    ],
+    "min_keyword_matches": 2
+  },
+  {
+    "id": "sqlmodel-async-session-exec",
+    "category": "specific-function",
+    "question": "How does async query execution work in SQLModel?",
+    "ground_truth": "SQLModel provides async session support under sqlmodel.ext.asyncio.session, including an async session wrapper that supports exec-style query execution for SQLModel statements in asynchronous applications.",
+    "expected_sources": [
+      "sqlmodel/ext/asyncio/session.py"
+    ],
+    "must_include_any": [
+      "async",
+      "AsyncSession",
+      "exec",
+      "greenlet"
+    ],
+    "min_keyword_matches": 2
+  },
+  {
+    "id": "sqlmodel-select-export",
+    "category": "specific-function",
+    "question": "How is select exposed to users in SQLModel?",
+    "ground_truth": "SQLModel re-exports a select helper from its SQL expression layer so users can write typed select statements directly from the sqlmodel package instead of importing SQLAlchemy primitives manually.",
+    "expected_sources": [
+      "sqlmodel/__init__.py",
+      "sqlmodel/sql/expression.py"
+    ],
+    "must_include_any": [
+      "select",
+      "re-export",
+      "expression",
+      "sqlmodel"
+    ],
+    "min_keyword_matches": 2
+  },
+  {
+    "id": "sqlmodel-create-engine-export",
+    "category": "specific-function",
+    "question": "How does SQLModel expose create_engine to application code?",
+    "ground_truth": "SQLModel re-exports create_engine from SQLAlchemy at the package level so users can import it directly from sqlmodel while using SQLModel models and sessions together.",
+    "expected_sources": [
+      "sqlmodel/__init__.py"
+    ],
+    "must_include_any": [
+      "create_engine",
+      "re-export",
+      "SQLAlchemy",
+      "sqlmodel"
+    ],
+    "min_keyword_matches": 2
+  },
+  {
+    "id": "sqlmodel-metadata-create-all",
+    "category": "config-setup",
+    "question": "How are database tables created when using SQLModel?",
+    "ground_truth": "Table creation typically happens by calling SQLModel.metadata.create_all(engine). SQLModel models register table metadata in a way that allows SQLAlchemy metadata creation workflows to build the underlying database tables.",
+    "expected_sources": [
+      "README.md",
+      "sqlmodel/main.py",
+      "docs_src"
+    ],
+    "must_include_any": [
+      "metadata",
+      "create_all",
+      "engine",
+      "table"
+    ],
+    "min_keyword_matches": 2
+  },
+  {
+    "id": "sqlmodel-package-exports",
+    "category": "config-setup",
+    "question": "What does sqlmodel.__init__ export for end users?",
+    "ground_truth": "The package initializer re-exports core user-facing APIs from SQLAlchemy and SQLModel, including create_engine, Session, SQLModel, Field, Relationship, and select-related helpers so application code can import most common primitives directly from sqlmodel.",
+    "expected_sources": [
+      "sqlmodel/__init__.py"
+    ],
+    "must_include_any": [
+      "Session",
+      "SQLModel",
+      "Field",
+      "create_engine"
+    ],
+    "min_keyword_matches": 3
+  },
+  {
+    "id": "sqlmodel-readme-basic-flow",
+    "category": "config-setup",
+    "question": "What basic database workflow does the README show for SQLModel?",
+    "ground_truth": "The README demonstrates defining a SQLModel table model, creating an engine, creating tables with metadata.create_all, opening a Session, inserting rows, committing, and then selecting rows with select and session.exec.",
+    "expected_sources": [
+      "README.md"
+    ],
+    "must_include_any": [
+      "create_engine",
+      "Session",
+      "create_all",
+      "select"
+    ],
+    "min_keyword_matches": 3
+  },
+  {
+    "id": "sqlmodel-column-options-errors",
+    "category": "error-handling",
+    "question": "How does SQLModel guard against conflicting or invalid Field configuration?",
+    "ground_truth": "SQLModel performs validation around Field configuration in its core model code and raises errors when incompatible options are combined or when SQLAlchemy-specific arguments conflict with other field settings.",
+    "expected_sources": [
+      "sqlmodel/main.py"
+    ],
+    "must_include_any": [
+      "raise",
+      "Field",
+      "conflict",
+      "sa_column"
+    ],
+    "min_keyword_matches": 2
+  },
+  {
+    "id": "sqlmodel-relationship-errors",
+    "category": "error-handling",
+    "question": "Where would SQLModel enforce invalid relationship configuration?",
+    "ground_truth": "Relationship configuration is handled in the core SQLModel model layer, where relationship metadata is collected and incompatible combinations are guarded before being translated to SQLAlchemy ORM behavior.",
+    "expected_sources": [
+      "sqlmodel/main.py"
+    ],
+    "must_include_any": [
+      "Relationship",
+      "metadata",
+      "SQLAlchemy",
+      "raise"
+    ],
+    "min_keyword_matches": 2
+  },
+  {
+    "id": "sqlmodel-session-cross-file",
+    "category": "cross-file",
+    "question": "How do SQLModel models flow into query execution with Session.exec()?",
+    "ground_truth": "Models are defined in the core SQLModel layer, queries are built through the SQL expression helpers such as select, and then those statements are executed through the SQLModel Session.exec wrapper, which ties model definitions and typed query execution together.",
+    "expected_sources": [
+      "sqlmodel/main.py",
+      "sqlmodel/sql/expression.py",
+      "sqlmodel/orm/session.py"
+    ],
+    "must_include_any": [
+      "select",
+      "Session",
+      "exec",
+      "model"
+    ],
+    "min_keyword_matches": 3
+  },
+  {
+    "id": "sqlmodel-sync-async-cross-file",
+    "category": "cross-file",
+    "question": "How does SQLModel support both sync and async session patterns across files?",
+    "ground_truth": "SQLModel exposes synchronous session helpers in its ORM session module and asynchronous support in the ext.asyncio package, giving similar exec-oriented ergonomics across both sync and async query paths.",
+    "expected_sources": [
+      "sqlmodel/orm/session.py",
+      "sqlmodel/ext/asyncio/session.py",
+      "sqlmodel/__init__.py"
+    ],
+    "must_include_any": [
+      "sync",
+      "async",
+      "Session",
+      "exec"
+    ],
+    "min_keyword_matches": 3
+  },
+  {
+    "id": "sqlmodel-field-to-table-flow",
+    "category": "cross-file",
+    "question": "How do typed Field declarations become SQL table columns in SQLModel?",
+    "ground_truth": "Typed model attributes and Field metadata are collected in the SQLModel core model layer, where SQLModel builds SQLAlchemy-compatible field and table metadata so the resulting class can participate in SQLAlchemy table creation and ORM mapping.",
+    "expected_sources": [
+      "sqlmodel/main.py",
+      "sqlmodel/_compat.py"
+    ],
+    "must_include_any": [
+      "Field",
+      "column",
+      "table",
+      "metadata"
+    ],
+    "min_keyword_matches": 3
+  },
+  {
+    "id": "sqlmodel-docs-fastapi-positioning",
+    "category": "docs",
+    "question": "How does the project describe SQLModel's relationship to FastAPI in its docs or README?",
+    "ground_truth": "The project describes SQLModel as being designed to simplify SQL database work in FastAPI applications and emphasizes that it is created by the same author, with strong compatibility between FastAPI, Pydantic, and SQLAlchemy.",
+    "expected_sources": [
+      "README.md",
+      "docs"
+    ],
+    "must_include_any": [
+      "FastAPI",
+      "same author",
+      "compatibility"
+    ],
+    "min_keyword_matches": 2
+  },
+  {
+    "id": "sqlmodel-followup-show-session-code",
+    "category": "conversation",
+    "turns": [
+      {
+        "role": "user",
+        "content": "How does SQLModel make query execution easier than raw SQLAlchemy?"
+      },
+      {
+        "role": "assistant",
+        "content": "It provides a Session.exec helper and package-level exports to simplify common query patterns."
+      }
+    ],
+    "question": "show me the code path for that",
+    "ground_truth": "The follow-up should stay anchored to Session.exec and SQLModel query ergonomics, retrieving code from the session wrapper and related SQLModel exports instead of drifting to README-only results.",
+    "expected_sources": [
+      "sqlmodel/orm/session.py",
+      "sqlmodel/__init__.py",
+      "sqlmodel/sql/expression.py"
+    ],
+    "must_include_any": [
+      "Session",
+      "exec",
+      "select"
+    ],
+    "min_keyword_matches": 2
+  },
+  {
+    "id": "sqlmodel-select-implementation-layer",
+    "category": "specific-function",
+    "question": "Where is select implemented under the hood and how is that different from how it is exposed publicly?",
+    "ground_truth": "SQLModel exposes select through package-level imports such as sqlmodel.__init__ and sqlmodel.sql.expression, while the implementation details and overload-heavy generation live in lower-level SQL expression modules like _expression_select_gen.py and related select classes.",
+    "expected_sources": [
+      "sqlmodel/__init__.py",
+      "sqlmodel/sql/expression.py",
+      "sqlmodel/sql/_expression_select_gen.py",
+      "sqlmodel/sql/_expression_select_cls.py"
+    ],
+    "must_include_any": [
+      "select",
+      "public",
+      "implementation",
+      "re-export"
+    ],
+    "min_keyword_matches": 2
+  },
+  {
+    "id": "sqlmodel-async-session-delegation",
+    "category": "cross-file",
+    "question": "How does AsyncSession.exec reuse the synchronous Session.exec path?",
+    "ground_truth": "The async session layer delegates execution to the synchronous Session.exec logic rather than duplicating it. AsyncSession uses greenlet-based bridging so async callers can reuse the sync execution wrapper and still get SQLModel-style exec ergonomics.",
+    "expected_sources": [
+      "sqlmodel/ext/asyncio/session.py",
+      "sqlmodel/orm/session.py"
+    ],
+    "must_include_any": [
+      "AsyncSession",
+      "Session",
+      "greenlet",
+      "exec"
+    ],
+    "min_keyword_matches": 3
+  },
+  {
+    "id": "sqlmodel-select-tutorial-usage",
+    "category": "docs",
+    "question": "How do the docs teach people to use select together with Session.exec?",
+    "ground_truth": "The tutorials show users building a statement with select(...) and then executing it through Session.exec(...), positioning exec as the ergonomic query entry point for SQLModel statements.",
+    "expected_sources": [
+      "docs/tutorial/select.md",
+      "README.md"
+    ],
+    "must_include_any": [
+      "select",
+      "Session",
+      "exec",
+      "statement"
+    ],
+    "min_keyword_matches": 3
+  },
+  {
+    "id": "sqlmodel-fastapi-response-model-docs",
+    "category": "docs",
+    "question": "How do the FastAPI docs describe using SQLModel models as response models?",
+    "ground_truth": "The FastAPI-focused docs explain that SQLModel classes can participate in API request and response modeling because they build on Pydantic, letting applications reuse models or related model variants in response_model patterns.",
+    "expected_sources": [
+      "docs/tutorial/fastapi/response-model.md",
+      "README.md"
+    ],
+    "must_include_any": [
+      "FastAPI",
+      "response_model",
+      "Pydantic",
+      "model"
+    ],
+    "min_keyword_matches": 2
+  },
+  {
+    "id": "sqlmodel-independent-library-positioning",
+    "category": "docs",
+    "question": "Does the project describe SQLModel as FastAPI-only or as a standalone library too?",
+    "ground_truth": "The docs position SQLModel as especially strong with FastAPI, but still as an independent library that can be used outside FastAPI. It is not described as FastAPI-only.",
+    "expected_sources": [
+      "README.md",
+      "docs/features.md",
+      "docs/index.md"
+    ],
+    "must_include_any": [
+      "FastAPI",
+      "independent",
+      "library",
+      "not"
+    ],
+    "min_keyword_matches": 2
+  },
+  {
+    "id": "sqlmodel-sa-relationship-test-guard",
+    "category": "tests",
+    "question": "What invalid Relationship combinations are guarded by tests?",
+    "ground_truth": "The relationship tests cover invalid combinations where a pre-built sa_relationship is mixed with sa_relationship_args or sa_relationship_kwargs, confirming that SQLModel raises when overlapping relationship configuration styles are combined.",
+    "expected_sources": [
+      "tests/test_field_sa_relationship.py",
+      "sqlmodel/main.py"
+    ],
+    "must_include_any": [
+      "sa_relationship",
+      "args",
+      "kwargs",
+      "raise"
+    ],
+    "min_keyword_matches": 3
+  },
+  {
+    "id": "sqlmodel-ondelete-nullable-test",
+    "category": "tests",
+    "question": "What does the project test about ondelete and nullable relationship fields?",
+    "ground_truth": "The test suite checks that using ondelete='SET NULL' on a non-nullable relationship field is invalid. The model layer should raise because SET NULL requires the underlying foreign key column to be nullable.",
+    "expected_sources": [
+      "tests/test_ondelete_raises.py",
+      "sqlmodel/main.py"
+    ],
+    "must_include_any": [
+      "ondelete",
+      "SET NULL",
+      "nullable",
+      "raise"
+    ],
+    "min_keyword_matches": 3
+  },
+  {
+    "id": "sqlmodel-type-validation-test",
+    "category": "tests",
+    "question": "What do the tests suggest about invalid SQLAlchemy or field type combinations in SQLModel?",
+    "ground_truth": "The tests indicate that SQLModel raises when unsupported or ambiguous field type combinations are mapped into SQLAlchemy columns, reinforcing that not every Python type annotation can become a database column shape automatically.",
+    "expected_sources": [
+      "tests/test_sqlalchemy_type_errors.py",
+      "sqlmodel/main.py"
+    ],
+    "must_include_any": [
+      "type",
+      "SQLAlchemy",
+      "raise",
+      "column"
+    ],
+    "min_keyword_matches": 2
+  },
+  {
+    "id": "sqlmodel-readme-engine-session-imports",
+    "category": "config-setup",
+    "question": "What top-level imports does the README encourage for getting started with SQLModel?",
+    "ground_truth": "The README encourages importing SQLModel, Field, Session, create_engine, and select from the top-level sqlmodel package so users can define models, create tables, and run queries with a unified import style.",
+    "expected_sources": [
+      "README.md",
+      "sqlmodel/__init__.py"
+    ],
+    "must_include_any": [
+      "SQLModel",
+      "Field",
+      "Session",
+      "create_engine",
+      "select"
+    ],
+    "min_keyword_matches": 4
+  },
+  {
+    "id": "sqlmodel-many-to-many-link-model-docs",
+    "category": "docs",
+    "question": "How do the relationship docs explain link_model for many-to-many mappings?",
+    "ground_truth": "The relationship docs explain that link_model is used as an association or link table model for many-to-many relationships, letting SQLModel connect two models through an explicit intermediary model.",
+    "expected_sources": [
+      "docs/tutorial/many-to-many/create-models-with-link.md",
+      "sqlmodel/main.py"
+    ],
+    "must_include_any": [
+      "link_model",
+      "many-to-many",
+      "association",
+      "relationship"
+    ],
+    "min_keyword_matches": 3
+  },
+  {
+    "id": "sqlmodel-followup-async-code-path",
+    "category": "conversation",
+    "turns": [
+      {
+        "role": "user",
+        "content": "How does async query execution work in SQLModel?"
+      },
+      {
+        "role": "assistant",
+        "content": "It uses AsyncSession and bridges into the sync session execution path."
+      }
+    ],
+    "question": "show me where that bridge happens",
+    "ground_truth": "The follow-up should stay on the async execution path and retrieve the async session module together with the sync session module it delegates to, rather than drifting to docs-only summaries.",
+    "expected_sources": [
+      "sqlmodel/ext/asyncio/session.py",
+      "sqlmodel/orm/session.py"
+    ],
+    "must_include_any": [
+      "AsyncSession",
+      "greenlet",
+      "Session",
+      "exec"
+    ],
+    "min_keyword_matches": 3
+  },
+  {
+    "id": "sqlmodel-followup-field-column-path",
+    "category": "conversation",
+    "turns": [
+      {
+        "role": "user",
+        "content": "How do typed Field declarations become SQL table columns in SQLModel?"
+      },
+      {
+        "role": "assistant",
+        "content": "The metaclass and field helpers translate Field metadata into SQLAlchemy Column objects."
+      }
+    ],
+    "question": "show me the main code path for that conversion",
+    "ground_truth": "The follow-up should stay anchored to the field-to-column conversion path in the core model implementation instead of drifting to tutorial prose alone.",
+    "expected_sources": [
+      "sqlmodel/main.py",
+      "sqlmodel/_compat.py"
+    ],
+    "must_include_any": [
+      "Field",
+      "Column",
+      "metaclass",
+      "conversion"
+    ],
+    "min_keyword_matches": 3
+  },
+  {
+    "id": "sqlmodel-followup-select-public-path",
+    "category": "conversation",
+    "turns": [
+      {
+        "role": "user",
+        "content": "How is select exposed to users in SQLModel?"
+      },
+      {
+        "role": "assistant",
+        "content": "It is re-exported for public use from the SQLModel package and expression layer."
+      }
+    ],
+    "question": "and where is the lower-level implementation behind that?",
+    "ground_truth": "The follow-up should connect the public export path to the lower-level select generator and select class implementation files instead of repeating only the package-level export story.",
+    "expected_sources": [
+      "sqlmodel/sql/expression.py",
+      "sqlmodel/sql/_expression_select_gen.py",
+      "sqlmodel/sql/_expression_select_cls.py"
+    ],
+    "must_include_any": [
+      "select",
+      "implementation",
+      "expression",
+      "class"
+    ],
+    "min_keyword_matches": 2
+  },
+  {
+    "id": "sqlmodel-test-vs-core-evidence-balance",
+    "category": "cross-file",
+    "question": "When explaining configuration errors in SQLModel, how should core implementation and tests complement each other?",
+    "ground_truth": "The core implementation in sqlmodel/main.py is the canonical source for behavior, while tests such as relationship and ondelete checks provide evidence that those guards are enforced in concrete scenarios. A good answer should balance both without treating tests as the primary implementation source.",
+    "expected_sources": [
+      "sqlmodel/main.py",
+      "tests/test_field_sa_relationship.py",
+      "tests/test_ondelete_raises.py"
+    ],
+    "must_include_any": [
+      "main.py",
+      "tests",
+      "canonical",
+      "guard"
+    ],
+    "min_keyword_matches": 2
+  },
+  {
+    "id": "sqlmodel-docs-vs-core-select-balance",
+    "category": "cross-file",
+    "question": "For explaining select in SQLModel, which files are canonical implementation sources and which are usage-oriented docs?",
+    "ground_truth": "The canonical implementation path is in sqlmodel.__init__, sqlmodel.sql.expression, and the lower-level select generator or select class modules, while files like README and docs/tutorial/select.md are usage-oriented documentation rather than the implementation itself.",
+    "expected_sources": [
+      "sqlmodel/__init__.py",
+      "sqlmodel/sql/expression.py",
+      "sqlmodel/sql/_expression_select_gen.py",
+      "docs/tutorial/select.md",
+      "README.md"
+    ],
+    "must_include_any": [
+      "canonical",
+      "implementation",
+      "docs",
+      "usage"
+    ],
+    "min_keyword_matches": 2
+  },
+  {
+    "id": "sqlmodel-features-doc-positioning",
+    "category": "docs",
+    "question": "What themes does the features documentation emphasize about SQLModel's value proposition?",
+    "ground_truth": "The features docs emphasize reduced duplication, editor friendliness, compatibility across Pydantic and SQLAlchemy, and an ergonomic way to work with SQL databases using standard Python type hints and models.",
+    "expected_sources": [
+      "docs/features.md",
+      "README.md"
+    ],
+    "must_include_any": [
+      "duplication",
+      "editor",
+      "compatibility",
+      "Python"
+    ],
+    "min_keyword_matches": 2
+  },
+  {
+    "id": "sqlmodel-docs-index-overview",
+    "category": "docs",
+    "question": "What kind of project overview should a user get from the docs index for SQLModel?",
+    "ground_truth": "The docs index should frame SQLModel as a Python SQL library that combines data modeling and database access patterns, point users toward tutorials or feature explanations, and reinforce its relationship to Pydantic, SQLAlchemy, and FastAPI.",
+    "expected_sources": [
+      "docs/index.md",
+      "README.md"
+    ],
+    "must_include_any": [
+      "overview",
+      "Pydantic",
+      "SQLAlchemy",
+      "FastAPI"
+    ],
+    "min_keyword_matches": 2
+  }
+]
