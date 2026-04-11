@@ -15,8 +15,8 @@ class QdrantVectorStore:
         self._ensure_collection()
 
     def _create_client(self):
-        url = os.getenv("QDRANT_URL")
-        api_key = os.getenv("QDRANT_API_KEY")
+        url = self._clean_env("QDRANT_URL")
+        api_key = self._clean_env("QDRANT_API_KEY")
         timeout = int(os.getenv("QDRANT_TIMEOUT_SECONDS", "120"))
         if url:
             return QdrantClient(
@@ -26,6 +26,14 @@ class QdrantVectorStore:
                 check_compatibility=False,
             )
         return QdrantClient(":memory:")
+
+    @staticmethod
+    def _clean_env(name: str) -> Optional[str]:
+        value = os.getenv(name)
+        if value is None:
+            return None
+        cleaned = value.strip()
+        return cleaned or None
 
     def _ensure_collection(self):
         if not self.client.collection_exists(self.collection_name):

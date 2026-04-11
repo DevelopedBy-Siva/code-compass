@@ -1,0 +1,26 @@
+name: Deploy Backend To Hugging Face Space
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "server/**"
+      - ".github/workflows/deploy-hf-space.yml"
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Sync server directory to Hugging Face Space
+        uses: huggingface/hub-sync@v0.1.0
+        with:
+          github_repo_id: technophyle/code-compass
+          huggingface_repo_id: technophyle/code-compass
+          hf_token: ${{ secrets.HF_TOKEN }}
+          repo_type: space
+          space_sdk: docker
+          subdirectory: server

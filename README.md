@@ -130,7 +130,7 @@ Main entry points:
 ### Retrieval Pipeline
 
 - tree-sitter for code-aware chunking
-- Vertex AI or local embeddings for semantic retrieval
+- Vertex AI or local embeddings for semantic retrieval depending on environment
 - BM25 for lexical retrieval
 - reciprocal rank fusion to combine retrieval channels
 - a cross-encoder reranker for final source ordering
@@ -210,6 +210,66 @@ Pure semantic search misses exact symbols and file names. Pure lexical search mi
 - enough for lightweight repository/session metadata
 - very low operational overhead
 - matches the project goal of staying simple while preserving useful state
+
+## Runtime Environments
+
+### Local Development And Evaluation
+
+Local development and the evaluation harness are designed around Vertex AI:
+- Vertex AI Gemini for answer generation
+- Vertex AI embeddings for semantic retrieval
+
+This setup is useful for:
+- higher quality local experiments
+- benchmark runs with RAGAS
+- comparing retrieval and answer quality in a stronger managed-model environment
+
+### Production Deployment
+
+The production deployment target is:
+- frontend on Vercel
+- backend on Hugging Face Spaces
+
+Production inference is configured differently from local/eval:
+- Groq-hosted Llama for answer generation
+- lightweight local sentence-transformer embeddings for semantic retrieval
+
+This production setup was chosen to fit Hugging Face Spaces free-tier constraints more comfortably while keeping the retrieval and answer pipeline intact.
+
+Recommended production runtime:
+- `LLM_PROVIDER=groq`
+- `EMBEDDING_PROVIDER=local`
+- `LIGHTWEIGHT_LOCAL_EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2`
+
+## Deployment
+
+### Production Topology
+
+- Vercel hosts the React frontend
+- Hugging Face Spaces hosts the FastAPI backend
+- the backend is packaged and deployed as a Docker Space
+- GitHub Actions syncs the backend code to the Space on pushes to `main`
+
+### Docker
+
+The backend is deployed with Docker using:
+- [`server/Dockerfile`](/Users/sivasankernp/Desktop/document-qa-rag-system/server/Dockerfile)
+
+The container:
+- installs Python dependencies
+- copies the backend application
+- starts the FastAPI app with Uvicorn on port `7860`
+
+### CI/CD
+
+Continuous deployment is handled through:
+- [`.github/workflows/deploy-hf-space.yml`](/Users/sivasankernp/Desktop/document-qa-rag-system/.github/workflows/deploy-hf-space.yml)
+
+The workflow:
+- runs on pushes to `main`
+- syncs the `server/` directory to the Hugging Face Space
+- triggers the Docker Space rebuild automatically
+
 
 ## Evaluation And Benchmarking
 
