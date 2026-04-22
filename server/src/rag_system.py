@@ -45,7 +45,7 @@ class CodebaseRAGSystem:
             )
         )
         self.app_env = os.getenv("APP_ENV", os.getenv("ENVIRONMENT", "local")).lower()
-        self.llm_provider = os.getenv("LLM_PROVIDER", "vertex_ai").lower()
+        self.llm_provider = os.getenv("LLM_PROVIDER", "bedrock").lower()
         self.llm_client = None
         self.llm_model = ""
         self._configure_llm()
@@ -534,6 +534,21 @@ Do not leave the answer unfinished.
             self.llm_model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
             return
 
+        if self.llm_provider == "bedrock":
+            try:
+                import boto3
+            except ImportError as exc:
+                raise RuntimeError(
+                    "AWS Bedrock LLM support requires the `boto3` package."
+                ) from exc
+
+            region = os.getenv("AWS_REGION", os.getenv("AWS_DEFAULT_REGION", "us-east-1"))
+            self.llm_client = boto3.client("bedrock-runtime", region_name=region)
+            self.llm_model = os.getenv(
+                "BEDROCK_LLM_MODEL", "us.meta.llama3-3-70b-instruct-v1:0"
+            )
+            return
+
         if self.llm_provider == "vertex_ai":
             try:
                 from google import genai
@@ -574,6 +589,31 @@ Do not leave the answer unfinished.
             content = response.choices[0].message.content
             finish_reason = getattr(response.choices[0], "finish_reason", "") or ""
             return self._normalize_markdown_answer(content), str(finish_reason)
+
+        if self.llm_provider == "bedrock":
+            response = self.llm_client.converse(
+                modelId=self.llm_model,
+                system=[{"text": system_prompt.strip()}],
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [{"text": user_prompt.strip()}],
+                    }
+                ],
+                inferenceConfig={
+                    "temperature": 0.1,
+                    "maxTokens": 2200,
+                },
+            )
+            output_message = (response.get("output") or {}).get("message") or {}
+            content_blocks = output_message.get("content") or []
+            text = "".join(
+                block.get("text", "") for block in content_blocks if isinstance(block, dict)
+            )
+            if not text.strip():
+                raise RuntimeError("AWS Bedrock returned an empty response.")
+            stop_reason = response.get("stopReason", "") or ""
+            return self._normalize_markdown_answer(text), str(stop_reason)
 
         response = self.llm_client.models.generate_content(
             model=self.llm_model,

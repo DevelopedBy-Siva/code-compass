@@ -67,7 +67,7 @@ Code Compass brings those elements together in one end-to-end application.
         ▼               ▼               ▼
 ┌──────────────┐  ┌──────────────┐  ┌──────────────┐
 │ RepoFetcher  │  │ CodeParser   │  │ Embeddings   │
-│ clone/filter │  │ tree-sitter  │  │ Vertex/local │
+│ clone/filter │  │ tree-sitter  │  │ Bedrock/local│
 └──────┬───────┘  │ fallback     │  └──────┬───────┘
        │          └──────┬───────┘         │
        │                 │                 │
@@ -106,8 +106,8 @@ Responsibilities:
 - display cited files, symbols, and line ranges
 
 Main entry points:
-- [`ui/src/App.js`](/Users/sivasankernp/Desktop/document-qa-rag-system/ui/src/App.js)
-- [`ui/src/config.js`](/Users/sivasankernp/Desktop/document-qa-rag-system/ui/src/config.js)
+- [`ui/src/App.js`](/Users/sivasankernp/Desktop/code-compass/ui/src/App.js)
+- [`ui/src/config.js`](/Users/sivasankernp/Desktop/code-compass/ui/src/config.js)
 
 ### Backend
 
@@ -124,24 +124,24 @@ Responsibilities:
 - return grounded answers and source metadata
 
 Main entry points:
-- [`server/server_app.py`](/Users/sivasankernp/Desktop/document-qa-rag-system/server/server_app.py)
-- [`server/src/rag_system.py`](/Users/sivasankernp/Desktop/document-qa-rag-system/server/src/rag_system.py)
+- [`server/server_app.py`](/Users/sivasankernp/Desktop/code-compass/server/server_app.py)
+- [`server/src/rag_system.py`](/Users/sivasankernp/Desktop/code-compass/server/src/rag_system.py)
 
 ### Retrieval Pipeline
 
 - tree-sitter for code-aware chunking
-- Vertex AI or local embeddings for semantic retrieval depending on environment
+- AWS Bedrock, Vertex AI, or local embeddings for semantic retrieval depending on environment
 - BM25 for lexical retrieval
 - reciprocal rank fusion to combine retrieval channels
 - a cross-encoder reranker for final source ordering
-- Gemini or Groq-backed LLM generation depending on environment configuration
+- AWS Bedrock, Groq, or Vertex AI generation depending on environment configuration
 
 Core modules:
-- [`server/src/code_parser.py`](/Users/sivasankernp/Desktop/document-qa-rag-system/server/src/code_parser.py)
-- [`server/src/embeddings.py`](/Users/sivasankernp/Desktop/document-qa-rag-system/server/src/embeddings.py)
-- [`server/src/hybrid_search.py`](/Users/sivasankernp/Desktop/document-qa-rag-system/server/src/hybrid_search.py)
-- [`server/src/vector_store.py`](/Users/sivasankernp/Desktop/document-qa-rag-system/server/src/vector_store.py)
-- [`server/src/repo_fetcher.py`](/Users/sivasankernp/Desktop/document-qa-rag-system/server/src/repo_fetcher.py)
+- [`server/src/code_parser.py`](/Users/sivasankernp/Desktop/code-compass/server/src/code_parser.py)
+- [`server/src/embeddings.py`](/Users/sivasankernp/Desktop/code-compass/server/src/embeddings.py)
+- [`server/src/hybrid_search.py`](/Users/sivasankernp/Desktop/code-compass/server/src/hybrid_search.py)
+- [`server/src/vector_store.py`](/Users/sivasankernp/Desktop/code-compass/server/src/vector_store.py)
+- [`server/src/repo_fetcher.py`](/Users/sivasankernp/Desktop/code-compass/server/src/repo_fetcher.py)
 
 ## Data Flow
 
@@ -213,16 +213,32 @@ Pure semantic search misses exact symbols and file names. Pure lexical search mi
 
 ## Runtime Environments
 
-### Local Development And Evaluation
+### Local Development
 
-Local development and the evaluation harness are designed around Vertex AI:
-- Vertex AI Gemini for answer generation
-- Vertex AI embeddings for semantic retrieval
+Local development is now designed around AWS Bedrock:
+- AWS Bedrock text generation for answer generation
+- AWS Bedrock embeddings for semantic retrieval
 
 This setup is useful for:
 - higher quality local experiments
-- benchmark runs with RAGAS
-- comparing retrieval and answer quality in a stronger managed-model environment
+- comparing retrieval and answer quality in a managed-model environment
+
+Recommended local runtime:
+- `LLM_PROVIDER=bedrock`
+- `EMBEDDING_PROVIDER=bedrock`
+- `AWS_REGION=us-east-1`
+- `BEDROCK_LLM_MODEL=us.meta.llama3-3-70b-instruct-v1:0`
+- `BEDROCK_EMBEDDING_MODEL=amazon.titan-embed-text-v2:0`
+
+### Evaluation
+
+The evaluation harness is designed around AWS Bedrock:
+- AWS Bedrock Claude for the RAGAS judge model
+- app-configured embeddings during evaluation
+
+Recommended eval runtime:
+- `EVAL_MODEL=us.anthropic.claude-haiku-4-5-20251001`
+- `AWS_REGION=us-east-1`
 
 ### Production Deployment
 
@@ -253,7 +269,7 @@ Recommended production runtime:
 ### Docker
 
 The backend is deployed with Docker using:
-- [`server/Dockerfile`](/Users/sivasankernp/Desktop/document-qa-rag-system/server/Dockerfile)
+- [`server/Dockerfile`](/Users/sivasankernp/Desktop/code-compass/server/Dockerfile)
 
 The container:
 - installs Python dependencies
@@ -263,7 +279,7 @@ The container:
 ### CI/CD
 
 Continuous deployment is handled through:
-- [`.github/workflows/deploy-hf-space.yml`](/Users/sivasankernp/Desktop/document-qa-rag-system/.github/workflows/deploy-hf-space.yml)
+- [`.github/workflows/deploy-hf-space.yml`](/Users/sivasankernp/Desktop/code-compass/.github/workflows/deploy-hf-space.yml)
 
 The workflow:
 - runs on pushes to `main`
@@ -276,8 +292,8 @@ The workflow:
 The project includes an end-to-end eval harness that calls the live API instead of mocking the retrieval pipeline.
 
 Files:
-- [`server/evals/run_eval.py`](/Users/sivasankernp/Desktop/document-qa-rag-system/server/evals/run_eval.py)
-- [`server/evals/sample_eval_set.json`](/Users/sivasankernp/Desktop/document-qa-rag-system/server/evals/sample_eval_set.json)
+- [`server/evals/run_eval.py`](/Users/sivasankernp/Desktop/code-compass/server/evals/run_eval.py)
+- [`server/evals/sample_eval_set.json`](/Users/sivasankernp/Desktop/code-compass/server/evals/sample_eval_set.json)
 
 The benchmark currently measures:
 - retrieval hit rate
@@ -288,6 +304,8 @@ The benchmark currently measures:
 - keyword-based answer checks
 - grounded answer rate
 - optional RAGAS judge metrics such as faithfulness and answer relevancy
+
+The current RAGAS judge configuration uses AWS Bedrock Claude Haiku 4.5 via `EVAL_MODEL`.
 
 The project includes a measurable end-to-end evaluation workflow alongside the product itself.
 
@@ -352,6 +370,12 @@ cd server
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+export LLM_PROVIDER=bedrock
+export EMBEDDING_PROVIDER=bedrock
+export AWS_REGION=us-east-1
+export BEDROCK_LLM_MODEL=us.meta.llama3-3-70b-instruct-v1:0
+export BEDROCK_EMBEDDING_MODEL=amazon.titan-embed-text-v2:0
+export EVAL_MODEL=us.anthropic.claude-haiku-4-5-20251001
 python server_app.py
 ```
 

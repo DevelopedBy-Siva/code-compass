@@ -423,18 +423,14 @@ def maybe_write_report(report):
     return str(target)
 
 
-def build_vertex_ragas_llm(run_config):
-    from google import genai
+def build_bedrock_ragas_llm(run_config):
+    import boto3
     from langchain_core.outputs import Generation, LLMResult
     from ragas.llms.base import BaseRagasLLM
 
-    class VertexRagasLLM(BaseRagasLLM):
-        def __init__(self, model: str, project: str, location: str, run_config):
-            self.client = genai.Client(
-                vertexai=True,
-                project=project,
-                location=location,
-            )
+    class BedrockRagasLLM(BaseRagasLLM):
+        def __init__(self, model: str, region: str, run_config):
+            self.client = boto3.client("bedrock-runtime", region_name=region)
             self.model = model
             self.set_run_config(run_config)
 
@@ -449,35 +445,35 @@ def build_vertex_ragas_llm(run_config):
 
         def _generate_once(self, prompt, n=1, temperature=1e-8, stop=None, callbacks=None):
             prompt_text = self._prompt_to_text(prompt)
-            config = {
+            inference_config = {
                 "temperature": 0.0,
-                "candidate_count": max(1, n),
-                "max_output_tokens": int(os.getenv("EVAL_MAX_OUTPUT_TOKENS", "2048")),
-                "response_mime_type": "application/json",
+                "maxTokens": int(os.getenv("EVAL_MAX_OUTPUT_TOKENS", "2048")),
             }
             if stop:
-                config["stop_sequences"] = stop
+                inference_config["stopSequences"] = stop
 
-            response = self.client.models.generate_content(
-                model=self.model,
-                contents=prompt_text,
-                config=config,
+            response = self.client.converse(
+                modelId=self.model,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [{"text": prompt_text}],
+                    }
+                ],
+                inferenceConfig=inference_config,
             )
 
-            candidates = getattr(response, "candidates", None) or []
             generations = []
-            if candidates:
-                for candidate in candidates[: max(1, n)]:
-                    text = getattr(candidate, "text", None)
-                    if text is None and hasattr(candidate, "content"):
-                        parts = getattr(candidate.content, "parts", None) or []
-                        text = "".join(getattr(part, "text", "") for part in parts if getattr(part, "text", ""))
-                    generations.append(Generation(text=(text or "").strip()))
-            elif getattr(response, "text", None):
-                generations.append(Generation(text=response.text.strip()))
+            output_message = (response.get("output") or {}).get("message") or {}
+            content_blocks = output_message.get("content") or []
+            text = "".join(
+                block.get("text", "") for block in content_blocks if isinstance(block, dict)
+            ).strip()
+            if text:
+                generations.append(Generation(text=text))
 
             if not generations:
-                raise RuntimeError("Vertex AI judge returned an empty response.")
+                raise RuntimeError("AWS Bedrock judge returned an empty response.")
 
             return LLMResult(generations=[generations])
 
@@ -500,12 +496,12 @@ def build_vertex_ragas_llm(run_config):
                 callbacks,
             )
 
-    project = os.getenv("GOOGLE_CLOUD_PROJECT")
-    location = os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
-    model = os.getenv("EVAL_MODEL", os.getenv("VERTEX_LLM_MODEL", "gemini-2.5-pro"))
-    if not project:
-        raise RuntimeError("GOOGLE_CLOUD_PROJECT must be set for Vertex AI RAGAS evaluation.")
-    return VertexRagasLLM(model=model, project=project, location=location, run_config=run_config)
+    region = os.getenv("AWS_REGION", os.getenv("AWS_DEFAULT_REGION", "us-east-1"))
+    model = os.getenv(
+        "EVAL_MODEL",
+        os.getenv("BEDROCK_EVAL_MODEL", "us.anthropic.claude-haiku-4-5-20251001"),
+    )
+    return BedrockRagasLLM(model=model, region=region, run_config=run_config)
 
 
 def build_ragas_embeddings(run_config):
@@ -572,14 +568,14 @@ def run_ragas(rows, outputs):
             max_wait=int(os.getenv("EVAL_MAX_WAIT_SECONDS", "60")),
         )
         log(
-            "Using Vertex AI for RAGAS judge model "
-            f"({os.getenv('EVAL_MODEL', os.getenv('VERTEX_LLM_MODEL', 'gemini-2.5-pro'))})"
+            "Using AWS Bedrock for RAGAS judge model "
+            f"({os.getenv('EVAL_MODEL', os.getenv('BEDROCK_EVAL_MODEL', 'us.anthropic.claude-haiku-4-5-20251001'))})"
         )
         log(
             f"RAGAS runtime: async={RAGAS_ASYNC}, raise_exceptions={RAGAS_RAISE_EXCEPTIONS}, "
             f"timeout={timeout_seconds}s, thread_timeout={thread_timeout_seconds}s, max_workers={max_workers}"
         )
-        llm = build_vertex_ragas_llm(run_config)
+        llm = build_bedrock_ragas_llm(run_config)
         embeddings = build_ragas_embeddings(run_config)
         ragas_report = evaluate(
             build_ragas_dataset(),

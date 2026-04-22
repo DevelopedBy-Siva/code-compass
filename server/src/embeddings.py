@@ -1,3 +1,4 @@
+import json
 import os
 import time
 from typing import Callable, List, Optional
@@ -71,6 +72,21 @@ class EmbeddingGenerator:
                     str(self.vertex_output_dimensionality or 3072),
                 )
             )
+        elif self.provider == "bedrock":
+            print(
+                f"[embeddings] Initializing AWS Bedrock embeddings with model={self.model_name}",
+                flush=True,
+            )
+            try:
+                import boto3
+            except ImportError as exc:
+                raise RuntimeError(
+                    "AWS Bedrock embedding support requires the `boto3` package."
+                ) from exc
+
+            region = os.getenv("AWS_REGION", os.getenv("AWS_DEFAULT_REGION", "us-east-1"))
+            self.client = boto3.client("bedrock-runtime", region_name=region)
+            self.embedding_dim = int(os.getenv("BEDROCK_EMBEDDING_DIM", "1024"))
         else:
             model_device = self.device or "cpu"
             print(
@@ -98,6 +114,8 @@ class EmbeddingGenerator:
                 [text],
                 task_type=self.vertex_task_type_query,
             )[0]
+        if self.provider == "bedrock":
+            return self._embed_with_bedrock(text)
         query_text = f"{self.query_prefix}: {text}" if self.query_prefix else text
         return self._encode_with_backoff([query_text], prompt_name=self.query_prompt_name)[0]
 
@@ -121,6 +139,12 @@ class EmbeddingGenerator:
             return np.array(embeddings, dtype="float32")
         if self.provider == "vertex_ai":
             return self._embed_batch_with_vertex(
+                texts=texts,
+                batch_size=batch_size,
+                progress_callback=progress_callback,
+            )
+        if self.provider == "bedrock":
+            return self._embed_batch_with_bedrock(
                 texts=texts,
                 batch_size=batch_size,
                 progress_callback=progress_callback,
@@ -222,6 +246,58 @@ class EmbeddingGenerator:
 
         return np.array(values, dtype="float32")
 
+    def _embed_batch_with_bedrock(
+        self,
+        texts: List[str],
+        batch_size: int = None,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+    ) -> np.ndarray:
+        effective_batch_size = max(1, batch_size or self.batch_size)
+        all_embeddings = []
+        total = len(texts)
+
+        for start in range(0, total, effective_batch_size):
+            batch = texts[start : start + effective_batch_size]
+            batch_number = (start // effective_batch_size) + 1
+            total_batches = (total + effective_batch_size - 1) // effective_batch_size
+            print(
+                f"[embeddings] Bedrock batch {batch_number}/{total_batches} "
+                f"items={len(batch)} progress={start}/{total}",
+                flush=True,
+            )
+            started_at = time.perf_counter()
+            batch_embeddings = [self._embed_with_bedrock(text) for text in batch]
+            all_embeddings.append(np.vstack(batch_embeddings))
+            elapsed = time.perf_counter() - started_at
+            print(
+                f"[embeddings] Finished Bedrock batch {batch_number}/{total_batches} "
+                f"elapsed={elapsed:.2f}s progress={min(start + len(batch), total)}/{total}",
+                flush=True,
+            )
+            if progress_callback:
+                progress_callback(min(start + len(batch), total), total)
+
+        return np.vstack(all_embeddings).astype("float32")
+
+    def _embed_with_bedrock(self, text: str) -> np.ndarray:
+        payload = {"inputText": text, "normalize": True}
+        if self.embedding_dim in {256, 512, 1024}:
+            payload["dimensions"] = self.embedding_dim
+
+        response = self.client.invoke_model(
+            modelId=self.model_name,
+            body=json.dumps(payload),
+            accept="application/json",
+            contentType="application/json",
+        )
+        body = json.loads(response["body"].read())
+        values = body.get("embedding")
+        if values is None:
+            values = (body.get("embeddingsByType") or {}).get("float")
+        if not values:
+            raise RuntimeError("AWS Bedrock embeddings returned an empty response.")
+        return np.array(values, dtype="float32")
+
     def _encode_with_backoff(
         self,
         texts: List[str],
@@ -266,12 +342,14 @@ class EmbeddingGenerator:
             return configured_provider
         if self._is_hf_space() or self._is_test_context():
             return "local"
-        return "vertex_ai"
+        return "bedrock"
 
     def _resolve_model_name(self) -> str:
         explicit_model = os.getenv("EMBEDDING_MODEL")
         if explicit_model:
             return explicit_model
+        if self.provider == "bedrock":
+            return os.getenv("BEDROCK_EMBEDDING_MODEL", "amazon.titan-embed-text-v2:0")
         if self.provider == "vertex_ai":
             return os.getenv("VERTEX_EMBEDDING_MODEL", "gemini-embedding-001")
         if self._is_hf_space() or self._is_test_context():

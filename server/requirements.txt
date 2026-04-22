@@ -5,6 +5,7 @@ pydantic==2.6.1
 python-dotenv==1.0.1
 
 openai==1.109.1
+boto3==1.40.58
 google-genai==1.12.1
 httpx==0.28.1
 numpy==1.26.4
