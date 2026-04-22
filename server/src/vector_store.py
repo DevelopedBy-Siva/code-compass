@@ -1,60 +1,44 @@
 import os
+from pathlib import Path
 from typing import List, Optional, Tuple
 from uuid import uuid4
 
 import numpy as np
-from qdrant_client import QdrantClient, models
+from chromadb import Client
+from chromadb.config import Settings
 
 
-class QdrantVectorStore:
-    def __init__(self, embedding_dim: int, index_path: str = None, persist: bool = False):
+class ChromaVectorStore:
+    def __init__(self, embedding_dim: int, index_path: str = None, persist: bool = True):
         self.embedding_dim = embedding_dim
-        self.collection_name = os.getenv("QDRANT_COLLECTION", "repo_qa_chunks")
-        self.upsert_batch_size = max(1, int(os.getenv("QDRANT_UPSERT_BATCH_SIZE", "64")))
+        self.collection_name = os.getenv("CHROMA_COLLECTION", "repo_qa_chunks")
+        self.upsert_batch_size = max(1, int(os.getenv("CHROMA_UPSERT_BATCH_SIZE", "64")))
+        self.persist_path = os.getenv("CHROMA_PATH", index_path or "./data/chroma")
+        self.persist = persist
         self.client = self._create_client()
-        self._ensure_collection()
+        self.collection = self._ensure_collection()
 
     def _create_client(self):
-        url = self._clean_env("QDRANT_URL")
-        api_key = self._clean_env("QDRANT_API_KEY")
-        timeout = int(os.getenv("QDRANT_TIMEOUT_SECONDS", "120"))
-        if url:
-            return QdrantClient(
-                url=url,
-                api_key=api_key,
-                timeout=timeout,
-                check_compatibility=False,
+        if self.persist:
+            Path(self.persist_path).mkdir(parents=True, exist_ok=True)
+            return Client(
+                Settings(
+                    is_persistent=True,
+                    persist_directory=self.persist_path,
+                    anonymized_telemetry=False,
+                )
             )
-        return QdrantClient(":memory:")
 
-    @staticmethod
-    def _clean_env(name: str) -> Optional[str]:
-        value = os.getenv(name)
-        if value is None:
-            return None
-        cleaned = value.strip()
-        return cleaned or None
+        return Client(Settings(anonymized_telemetry=False))
 
     def _ensure_collection(self):
-        if not self.client.collection_exists(self.collection_name):
-            self.client.create_collection(
-                collection_name=self.collection_name,
-                vectors_config=models.VectorParams(
-                    size=self.embedding_dim,
-                    distance=models.Distance.COSINE,
-                ),
-            )
-        self._ensure_payload_indexes()
-
-    def _ensure_payload_indexes(self):
-        self.client.create_payload_index(
-            collection_name=self.collection_name,
-            field_name="repository_id",
-            field_schema=models.PayloadSchemaType.INTEGER,
-            wait=True,
+        return self.client.get_or_create_collection(
+            name=self.collection_name,
+            embedding_function=None,
+            metadata={"hnsw:space": "cosine"},
         )
 
-    def add_embeddings(self, embeddings: np.ndarray, metadata: List[dict]) -> List[int]:
+    def add_embeddings(self, embeddings: np.ndarray, metadata: List[dict]) -> List[str]:
         if embeddings.size == 0:
             return []
 
@@ -63,31 +47,33 @@ class QdrantVectorStore:
             embeddings = embeddings.reshape(1, -1)
 
         ids = [uuid4().hex for _ in metadata]
-        points = []
-        for idx, meta, embedding in zip(ids, metadata, embeddings):
-            payload = dict(meta)
-            payload["id"] = idx
-            points.append(
-                models.PointStruct(
-                    id=idx,
-                    vector=embedding.tolist(),
-                    payload=payload,
-                )
-            )
-        total_points = len(points)
+        total_points = len(ids)
+
         for start in range(0, total_points, self.upsert_batch_size):
-            batch = points[start : start + self.upsert_batch_size]
+            end = start + self.upsert_batch_size
+            batch_ids = ids[start:end]
+            batch_embeddings = embeddings[start:end].tolist()
+            batch_metadata = []
+            batch_documents = []
+
+            for idx, meta in zip(batch_ids, metadata[start:end]):
+                payload = self._sanitize_metadata(meta)
+                payload["id"] = idx
+                batch_metadata.append(payload)
+                batch_documents.append(str(meta.get("content") or ""))
+
             batch_number = (start // self.upsert_batch_size) + 1
             total_batches = (total_points + self.upsert_batch_size - 1) // self.upsert_batch_size
             print(
-                f"[qdrant] Upserting batch {batch_number}/{total_batches} "
-                f"points={len(batch)} progress={start}/{total_points}",
+                f"[chroma] Adding batch {batch_number}/{total_batches} "
+                f"points={len(batch_ids)} progress={start}/{total_points}",
                 flush=True,
             )
-            self.client.upsert(
-                collection_name=self.collection_name,
-                wait=True,
-                points=batch,
+            self.collection.add(
+                ids=batch_ids,
+                embeddings=batch_embeddings,
+                metadatas=batch_metadata,
+                documents=batch_documents,
             )
 
         return ids
@@ -102,57 +88,75 @@ class QdrantVectorStore:
             query_embedding = query_embedding.reshape(1, -1)
         query_embedding = query_embedding.astype("float32")
 
-        query_filter = None
-        if repo_filter is not None:
-            query_filter = models.Filter(
-                must=[
-                    models.FieldCondition(
-                        key="repository_id",
-                        match=models.MatchValue(value=repo_filter),
-                    )
-                ]
-            )
-
-        hits = self.client.search(
-            collection_name=self.collection_name,
-            query_vector=query_embedding[0].tolist(),
-            query_filter=query_filter,
-            limit=k,
+        where = {"repository_id": repo_filter} if repo_filter is not None else None
+        results = self.collection.query(
+            query_embeddings=[query_embedding[0].tolist()],
+            n_results=k,
+            where=where,
+            include=["documents", "metadatas", "distances"],
         )
 
-        return [(float(hit.score), dict(hit.payload or {})) for hit in hits]
+        ids = (results.get("ids") or [[]])[0]
+        documents = (results.get("documents") or [[]])[0]
+        metadatas = (results.get("metadatas") or [[]])[0]
+        distances = (results.get("distances") or [[]])[0]
+
+        hits = []
+        for idx, document, meta, distance in zip(ids, documents, metadatas, distances):
+            payload = dict(meta or {})
+            payload["id"] = payload.get("id") or idx
+            payload["content"] = document or ""
+            hits.append((self._distance_to_score(distance), payload))
+        return hits
 
     def remove_repository(self, repo_id: int):
-        self.client.delete(
-            collection_name=self.collection_name,
-            wait=True,
-            points_selector=models.FilterSelector(
-                filter=models.Filter(
-                    must=[
-                        models.FieldCondition(
-                            key="repository_id",
-                            match=models.MatchValue(value=repo_id),
-                        )
-                    ]
-                )
-            ),
-        )
+        self.collection.delete(where={"repository_id": repo_id})
 
     def clear(self):
-        if self.client.collection_exists(self.collection_name):
-            self.client.delete_collection(self.collection_name)
-        self._ensure_collection()
+        try:
+            self.client.delete_collection(name=self.collection_name)
+        except Exception:
+            pass
+        self.collection = self._ensure_collection()
 
     def save(self):
-        return None
+        persist = getattr(self.client, "persist", None)
+        if callable(persist):
+            persist()
 
     def load(self):
-        self._ensure_collection()
+        self.collection = self._ensure_collection()
+
+    def keep_alive(self) -> dict:
+        heartbeat = getattr(self.client, "heartbeat", None)
+        if callable(heartbeat):
+            heartbeat()
+        return self.get_stats()
 
     def get_stats(self) -> dict:
-        info = self.client.get_collection(self.collection_name)
         return {
-            "total_vectors": info.points_count or 0,
+            "total_vectors": self.collection.count(),
             "embedding_dim": self.embedding_dim,
             "collection_name": self.collection_name,
+            "persist_path": self.persist_path if self.persist else None,
         }
+
+    @staticmethod
+    def _sanitize_metadata(meta: dict) -> dict:
+        sanitized = {}
+        for key, value in meta.items():
+            if key == "content":
+                continue
+            if value is None:
+                sanitized[key] = ""
+            elif isinstance(value, (str, int, float, bool)):
+                sanitized[key] = value
+            else:
+                sanitized[key] = str(value)
+        return sanitized
+
+    @staticmethod
+    def _distance_to_score(distance: float) -> float:
+        if distance is None:
+            return 0.0
+        return max(0.0, min(1.0, 1.0 - float(distance)))

@@ -11,12 +11,17 @@ SUPPORTED_EXTENSIONS = {
     ".py",
     ".js",
     ".jsx",
+    ".mjs",
+    ".cjs",
     ".ts",
     ".tsx",
+    ".mts",
+    ".cts",
     ".java",
     ".go",
     ".rs",
     ".md",
+    ".mdx",
     ".json",
     ".yml",
     ".yaml",
@@ -24,6 +29,12 @@ SUPPORTED_EXTENSIONS = {
     ".sh",
     ".css",
     ".html",
+    ".prisma",
+}
+
+SUPPORTED_FILENAMES = {
+    ".env.example",
+    "Dockerfile",
 }
 
 IGNORED_FILENAMES = {
@@ -34,13 +45,23 @@ IGNORED_FILENAMES = {
 }
 
 IGNORED_DIRS = {
+    ".agents",
+    ".cache",
     ".git",
+    ".mypy_cache",
     ".next",
+    ".opencode",
+    ".parcel-cache",
+    ".pytest_cache",
+    ".ruff_cache",
     ".turbo",
+    ".vite",
     "dist",
     "build",
     "coverage",
+    "logs",
     "node_modules",
+    "tmp",
     "vendor",
     ".venv",
     "venv",
@@ -153,11 +174,15 @@ class RepoFetcher:
         for file_path in root.rglob("*"):
             if not file_path.is_file():
                 continue
-            if any(part in IGNORED_DIRS for part in file_path.parts):
+            relative_parts = file_path.relative_to(root).parts
+            if any(part in IGNORED_DIRS for part in relative_parts):
                 continue
             if file_path.name in IGNORED_FILENAMES:
                 continue
-            if file_path.suffix.lower() not in SUPPORTED_EXTENSIONS:
+            if (
+                file_path.suffix.lower() not in SUPPORTED_EXTENSIONS
+                and file_path.name not in SUPPORTED_FILENAMES
+            ):
                 continue
             if file_path.stat().st_size > MAX_FILE_SIZE_BYTES:
                 continue

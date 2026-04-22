@@ -10,21 +10,21 @@ This project includes:
 
 ## Why This Project Matters
 
-Strong applied AI projects usually show:
+This project is written to show the parts recruiters and engineering reviewers usually look for in a personal AI project:
 - clear system design
-- practical backend and frontend integration
-- retrieval and ranking logic beyond a single prompt
+- practical frontend, backend, and deployment integration
+- retrieval and ranking logic beyond a single LLM prompt
 - measurable evaluation instead of anecdotal demos
 - thoughtful tradeoffs around cost, latency, and persistence
 
-Code Compass brings those elements together in one end-to-end application.
+Code Compass brings those elements together in one end-to-end application with visible architecture, source citations, and an evaluation harness ready for benchmark results.
 
 ## What The System Does
 
 1. A user pastes a GitHub repository URL into the UI.
 2. The backend clones the repository into a temporary local directory.
 3. Source files are filtered and chunked using tree-sitter and fallback text chunking.
-4. The system generates embeddings for chunks and stores them in a Qdrant-backed vector layer.
+4. The system generates embeddings for chunks and stores them in a Chroma-backed vector layer.
 5. At query time, the system retrieves evidence with:
    - semantic vector search
    - lexical BM25 search
@@ -67,16 +67,16 @@ Code Compass brings those elements together in one end-to-end application.
         ▼               ▼               ▼
 ┌──────────────┐  ┌──────────────┐  ┌──────────────┐
 │ RepoFetcher  │  │ CodeParser   │  │ Embeddings   │
-│ clone/filter │  │ tree-sitter  │  │ Vertex/local │
+│ clone/filter │  │ tree-sitter  │  │ Bedrock/local│
 └──────┬───────┘  │ fallback     │  └──────┬───────┘
        │          └──────┬───────┘         │
        │                 │                 │
        └────────────┬────┴────────────┬────┘
                     ▼                 ▼
            ┌──────────────┐   ┌──────────────┐
-           │ SQLite       │   │ Qdrant       │
-           │ repo/status  │   │ vector store │
-           │ metadata     │   └──────┬───────┘
+           │ In-memory    │   │ Chroma       │
+           │ repo/session │   │ vector store │
+           │ state        │   └──────┬───────┘
            └──────────────┘          │
                                      ▼
                            ┌──────────────────┐
@@ -106,15 +106,14 @@ Responsibilities:
 - display cited files, symbols, and line ranges
 
 Main entry points:
-- [`ui/src/App.js`](/Users/sivasankernp/Desktop/document-qa-rag-system/ui/src/App.js)
-- [`ui/src/config.js`](/Users/sivasankernp/Desktop/document-qa-rag-system/ui/src/config.js)
+- [`ui/src/App.js`](/Users/sivasankernp/Desktop/code-compass/ui/src/App.js)
+- [`ui/src/config.js`](/Users/sivasankernp/Desktop/code-compass/ui/src/config.js)
 
 ### Backend
 
 - FastAPI
 - Pydantic
-- SQLAlchemy
-- SQLite for lightweight repository metadata
+- in-memory session and repository state
 
 Responsibilities:
 - validate requests
@@ -124,24 +123,24 @@ Responsibilities:
 - return grounded answers and source metadata
 
 Main entry points:
-- [`server/server_app.py`](/Users/sivasankernp/Desktop/document-qa-rag-system/server/server_app.py)
-- [`server/src/rag_system.py`](/Users/sivasankernp/Desktop/document-qa-rag-system/server/src/rag_system.py)
+- [`server/server_app.py`](/Users/sivasankernp/Desktop/code-compass/server/server_app.py)
+- [`server/src/rag_system.py`](/Users/sivasankernp/Desktop/code-compass/server/src/rag_system.py)
 
 ### Retrieval Pipeline
 
 - tree-sitter for code-aware chunking
-- Vertex AI or local embeddings for semantic retrieval depending on environment
+- Amazon Bedrock or local embeddings for semantic retrieval depending on environment
 - BM25 for lexical retrieval
 - reciprocal rank fusion to combine retrieval channels
 - a cross-encoder reranker for final source ordering
-- Gemini or Groq-backed LLM generation depending on environment configuration
+- Groq or Amazon Bedrock generation depending on environment configuration
 
 Core modules:
-- [`server/src/code_parser.py`](/Users/sivasankernp/Desktop/document-qa-rag-system/server/src/code_parser.py)
-- [`server/src/embeddings.py`](/Users/sivasankernp/Desktop/document-qa-rag-system/server/src/embeddings.py)
-- [`server/src/hybrid_search.py`](/Users/sivasankernp/Desktop/document-qa-rag-system/server/src/hybrid_search.py)
-- [`server/src/vector_store.py`](/Users/sivasankernp/Desktop/document-qa-rag-system/server/src/vector_store.py)
-- [`server/src/repo_fetcher.py`](/Users/sivasankernp/Desktop/document-qa-rag-system/server/src/repo_fetcher.py)
+- [`server/src/code_parser.py`](/Users/sivasankernp/Desktop/code-compass/server/src/code_parser.py)
+- [`server/src/embeddings.py`](/Users/sivasankernp/Desktop/code-compass/server/src/embeddings.py)
+- [`server/src/hybrid_search.py`](/Users/sivasankernp/Desktop/code-compass/server/src/hybrid_search.py)
+- [`server/src/vector_store.py`](/Users/sivasankernp/Desktop/code-compass/server/src/vector_store.py)
+- [`server/src/repo_fetcher.py`](/Users/sivasankernp/Desktop/code-compass/server/src/repo_fetcher.py)
 
 ## Data Flow
 
@@ -199,30 +198,50 @@ Pure semantic search misses exact symbols and file names. Pure lexical search mi
 - nearby implementation detail
 - cross-file semantic similarity
 
-### Why Qdrant
+### Why Chroma
 
 - simple vector abstraction
-- local in-memory mode for fast demos
-- cloud-compatible path for later deployment
+- one vector database path for both local and production runtime
+- persistent local storage without a separate hosted vector service
+- direct support for externally generated embeddings and metadata filters
 
-### Why SQLite
+### Why In-Memory Session State
 
-- enough for lightweight repository/session metadata
-- very low operational overhead
-- matches the project goal of staying simple while preserving useful state
+- repository/session metadata is short-lived and cleared when the backend restarts
+- no separate relational database is needed for the current product flow
+- the API still exposes indexing status and session-scoped repositories while keeping deployment simpler
 
 ## Runtime Environments
 
-### Local Development And Evaluation
+### Local Development
 
-Local development and the evaluation harness are designed around Vertex AI:
-- Vertex AI Gemini for answer generation
-- Vertex AI embeddings for semantic retrieval
+Local development is configured for higher-quality experimentation:
+- Claude Sonnet 4 on Amazon Bedrock for answer generation
+- Cohere Embed v4 on Amazon Bedrock for semantic retrieval
 
 This setup is useful for:
 - higher quality local experiments
-- benchmark runs with RAGAS
-- comparing retrieval and answer quality in a stronger managed-model environment
+- comparing retrieval and answer quality in a managed-model environment
+
+Recommended local runtime:
+- `LLM_PROVIDER=bedrock`
+- `EMBEDDING_PROVIDER=bedrock`
+- `AWS_REGION=us-east-1`
+- `BEDROCK_LLM_MODEL=anthropic.claude-sonnet-4-20250514-v1:0`
+- `BEDROCK_EMBEDDING_MODEL=cohere.embed-v4:0`
+- `BEDROCK_EMBEDDING_DIM=1536`
+- `CHROMA_PATH=./data/chroma`
+- `CHROMA_COLLECTION=repo_qa_chunks`
+
+### Evaluation
+
+The evaluation harness is now designed around Amazon Bedrock:
+- Bedrock Claude Opus 4 for the RAGAS judge model
+- app-configured embeddings during evaluation
+
+Recommended eval runtime:
+- `EVAL_MODEL=anthropic.claude-opus-4-20250514-v1:0`
+- `AWS_REGION=us-east-1`
 
 ### Production Deployment
 
@@ -230,16 +249,19 @@ The production deployment target is:
 - frontend on Vercel
 - backend on Hugging Face Spaces
 
-Production inference is configured differently from local/eval:
+Production inference is configured differently from local development:
 - Groq-hosted Llama for answer generation
 - lightweight local sentence-transformer embeddings for semantic retrieval
+- Chroma DB for vector storage
 
-This production setup was chosen to fit Hugging Face Spaces free-tier constraints more comfortably while keeping the retrieval and answer pipeline intact.
+This production setup was chosen to fit Hugging Face Spaces free-tier constraints more comfortably while keeping the retrieval and answer pipeline intact. Chroma is used in production and local development so the vector storage behavior stays consistent across environments.
 
 Recommended production runtime:
 - `LLM_PROVIDER=groq`
 - `EMBEDDING_PROVIDER=local`
 - `LIGHTWEIGHT_LOCAL_EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2`
+- `CHROMA_PATH=./data/chroma`
+- `CHROMA_COLLECTION=repo_qa_chunks`
 
 ## Deployment
 
@@ -253,7 +275,7 @@ Recommended production runtime:
 ### Docker
 
 The backend is deployed with Docker using:
-- [`server/Dockerfile`](/Users/sivasankernp/Desktop/document-qa-rag-system/server/Dockerfile)
+- [`server/Dockerfile`](/Users/sivasankernp/Desktop/code-compass/server/Dockerfile)
 
 The container:
 - installs Python dependencies
@@ -263,7 +285,7 @@ The container:
 ### CI/CD
 
 Continuous deployment is handled through:
-- [`.github/workflows/deploy-hf-space.yml`](/Users/sivasankernp/Desktop/document-qa-rag-system/.github/workflows/deploy-hf-space.yml)
+- [`.github/workflows/deploy-hf-space.yml`](/Users/sivasankernp/Desktop/code-compass/.github/workflows/deploy-hf-space.yml)
 
 The workflow:
 - runs on pushes to `main`
@@ -276,8 +298,8 @@ The workflow:
 The project includes an end-to-end eval harness that calls the live API instead of mocking the retrieval pipeline.
 
 Files:
-- [`server/evals/run_eval.py`](/Users/sivasankernp/Desktop/document-qa-rag-system/server/evals/run_eval.py)
-- [`server/evals/sample_eval_set.json`](/Users/sivasankernp/Desktop/document-qa-rag-system/server/evals/sample_eval_set.json)
+- [`server/evals/run_eval.py`](/Users/sivasankernp/Desktop/code-compass/server/evals/run_eval.py)
+- [`server/evals/sample_eval_set.json`](/Users/sivasankernp/Desktop/code-compass/server/evals/sample_eval_set.json)
 
 The benchmark currently measures:
 - retrieval hit rate
@@ -289,42 +311,48 @@ The benchmark currently measures:
 - grounded answer rate
 - optional RAGAS judge metrics such as faithfulness and answer relevancy
 
-The project includes a measurable end-to-end evaluation workflow alongside the product itself.
+The current RAGAS judge configuration uses Bedrock Claude Opus 4 via `EVAL_MODEL`.
+
+The project includes a measurable end-to-end evaluation workflow alongside the product itself. Metric values are intentionally left pending until the benchmark is rerun, so the README does not claim unverified results.
 
 ### Benchmark Snapshot
 
-Latest expanded internal benchmark:
-- 37 evaluation cases
-- 8 categories
+Current sample benchmark target:
+- Documenso (`https://github.com/documenso/documenso.git`)
+- 43 evaluation cases
+- 10 categories
 - 4 multi-turn conversation cases
-
-Headline metrics from the current benchmark run:
+- full-application coverage across architecture, docs, setup, API layers, document flows, signing, email, jobs, tests, and follow-up questions
 
 | Metric | Result |
 | --- | ---: |
-| Retrieval hit rate | 95.0% |
-| Top-1 hit rate | 75.0% |
-| Mean reciprocal rank | 0.85 |
-| Source recall | 74.2% |
-| Faithfulness (RAGAS) | 0.917 |
-| Answer relevancy (RAGAS) | 0.843 |
-| Context precision (RAGAS) | 0.767 |
+| Retrieval hit rate | To be added after rerun |
+| Top-1 hit rate | To be added after rerun |
+| Mean reciprocal rank | To be added after rerun |
+| Source recall | To be added after rerun |
+| Grounded answer rate | To be added after rerun |
+| Keyword/checklist pass rate | To be added after rerun |
+| Reference-support pass rate | To be added after rerun |
+| Faithfulness (RAGAS, supporting) | To be added after rerun |
+| Answer relevancy (RAGAS, supporting) | To be added after rerun |
+| Context precision (RAGAS, supporting) | To be added after rerun |
 
 What these numbers mean:
-- the system retrieves at least one relevant source for the large majority of benchmark cases
-- the first-ranked source is relevant in most cases, with the biggest remaining opportunity in canonical file ranking for harder prompts
-- the benchmark includes architecture, API, setup, docs, tests, cross-file, and conversation-style questions
-- the evaluation provides a solid engineering benchmark for the current system and repo scope
+- the system should retrieve at least one relevant source for most benchmark cases
+- the first-ranked source is expected to be relevant in most cases, with an internal 80% top-1 target
+- the benchmark includes architecture, API, setup, docs, tests, cross-file workflows, code-generation checklists, and conversation-style questions
+- RAGAS is treated as a secondary judge signal; deterministic retrieval and grounded checklist metrics are the primary gates
 
 Benchmark strengths:
-- strong retrieval on architecture and setup questions
-- grounded answers with source-linked citations
-- measurable end-to-end performance instead of anecdotal examples
+- full-stack application benchmark rather than a library-only benchmark
+- product-domain questions around documents, recipients, fields, signing, emails, jobs, and webhooks
+- measurable end-to-end performance instead of anecdotal examples once the new run is complete
 
 Benchmark-exposed weaknesses:
-- duplicate source retrieval still appears in some cases
-- some cross-file and test-heavy questions remain harder than single-file API questions
-- canonical implementation files are not always ranked first on the hardest prompts
+- the sample set is focused on one target project, so it should be broadened before being presented as general benchmark evidence
+- Documenso is a large TypeScript monorepo, so context precision and directory-level source selection matter more than in the old library-focused eval
+- some cross-file, specific-function, and test-heavy questions may remain harder than single-file API questions
+- canonical implementation files may not always rank first on the hardest prompts
 
 ## Project Strengths
 
@@ -352,6 +380,13 @@ cd server
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+export LLM_PROVIDER=bedrock
+export EMBEDDING_PROVIDER=bedrock
+export AWS_REGION=us-east-1
+export BEDROCK_LLM_MODEL=anthropic.claude-sonnet-4-20250514-v1:0
+export BEDROCK_EMBEDDING_MODEL=cohere.embed-v4:0
+export BEDROCK_EMBEDDING_DIM=1536
+export EVAL_MODEL=anthropic.claude-opus-4-20250514-v1:0
 python server_app.py
 ```
 

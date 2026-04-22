@@ -5,8 +5,9 @@ import pypdf
 
 
 class DocumentProcessor:
-
-    def __init__(self, chunk_size: int = 512, chunk_overlap: int = 50):
+    # FIX: 512 chars was too small — caused mid-thought splits that hurt faithfulness.
+    # 1200 chars with 150 overlap keeps full function signatures + docstrings intact.
+    def __init__(self, chunk_size: int = 1200, chunk_overlap: int = 150):
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
 
@@ -19,7 +20,6 @@ class DocumentProcessor:
                     text += page.extract_text() + "\n"
         except Exception as e:
             raise ValueError(f"Error reading PDF: {str(e)}")
-
         return text.strip()
 
     def chunk_text(self, text: str) -> List[str]:
@@ -35,24 +35,34 @@ class DocumentProcessor:
             chunk = text[start:end]
 
             if end < text_length:
+                # FIX: prefer paragraph breaks > sentence breaks > newlines.
+                # Previously only checked period + newline, missing paragraph boundaries.
+                last_double_newline = chunk.rfind("\n\n")
                 last_period = chunk.rfind(".")
                 last_newline = chunk.rfind("\n")
-                break_point = max(last_period, last_newline)
 
-                if break_point > self.chunk_size * 0.5:
-                    chunk = chunk[: break_point + 1]
-                    end = start + break_point + 1
+                if last_double_newline > self.chunk_size * 0.4:
+                    break_point = last_double_newline + 1
+                elif last_period > self.chunk_size * 0.5:
+                    break_point = last_period + 1
+                elif last_newline > self.chunk_size * 0.4:
+                    break_point = last_newline + 1
+                else:
+                    break_point = self.chunk_size
 
-            chunks.append(chunk.strip())
+                chunk = chunk[:break_point]
+                end = start + break_point
+
+            stripped = chunk.strip()
+            if stripped:
+                chunks.append(stripped)
 
             start = end - self.chunk_overlap
 
         return [c for c in chunks if c]
 
     def process_document(self, file_path: str) -> Tuple[str, List[str]]:
-
         file_ext = Path(file_path).suffix.lower()
-
         if file_ext == ".pdf":
             text = self.extract_text_from_pdf(file_path)
         elif file_ext == ".txt":
@@ -62,7 +72,6 @@ class DocumentProcessor:
             raise ValueError(f"Unsupported file type: {file_ext}")
 
         chunks = self.chunk_text(text)
-
         return text, chunks
 
     @staticmethod

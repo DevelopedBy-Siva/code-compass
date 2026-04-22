@@ -1,10 +1,10 @@
 import os
 import time
+import json
 from typing import Callable, List, Optional
 
 import numpy as np
 from openai import OpenAI
-from sentence_transformers import SentenceTransformer
 
 
 class EmbeddingGenerator:
@@ -16,6 +16,10 @@ class EmbeddingGenerator:
         self.device = os.getenv("EMBEDDING_DEVICE")
         self.client = None
         self.model = None
+        self.bedrock_client = None
+        self.bedrock_output_dimensionality = self._optional_int(
+            os.getenv("BEDROCK_EMBEDDING_OUTPUT_DIMENSIONALITY")
+        )
         self.vertex_task_type_document = os.getenv(
             "VERTEX_EMBEDDING_TASK_TYPE_DOCUMENT", "RETRIEVAL_DOCUMENT"
         )
@@ -41,6 +45,28 @@ class EmbeddingGenerator:
             )
             self.client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
             self.embedding_dim = int(os.getenv("OPENAI_EMBEDDING_DIM", "1536"))
+        elif self.provider == "bedrock":
+            print(
+                f"[embeddings] Initializing Bedrock embeddings with model={self.model_name}",
+                flush=True,
+            )
+            try:
+                import boto3
+            except ImportError as exc:
+                raise RuntimeError(
+                    "Bedrock embedding support requires the `boto3` package."
+                ) from exc
+
+            self.bedrock_client = boto3.client(
+                "bedrock-runtime",
+                region_name=os.getenv("AWS_REGION", os.getenv("AWS_DEFAULT_REGION", "us-east-1")),
+            )
+            self.embedding_dim = int(
+                os.getenv(
+                    "BEDROCK_EMBEDDING_DIM",
+                    str(self.bedrock_output_dimensionality or 1536),
+                )
+            )
         elif self.provider == "vertex_ai":
             print(
                 f"[embeddings] Initializing Vertex AI embeddings with model={self.model_name}",
@@ -54,7 +80,7 @@ class EmbeddingGenerator:
                 ) from exc
 
             project = os.getenv("GOOGLE_CLOUD_PROJECT")
-            location = os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
+            location = os.getenv("GOOGLE_CLOUD_LOCATION", "global")
             if not project:
                 raise RuntimeError(
                     "GOOGLE_CLOUD_PROJECT must be set when using Vertex AI embeddings."
@@ -72,6 +98,12 @@ class EmbeddingGenerator:
                 )
             )
         else:
+            try:
+                from sentence_transformers import SentenceTransformer
+            except ImportError as exc:
+                raise RuntimeError(
+                    "Local embedding support requires the `sentence-transformers` package."
+                ) from exc
             model_device = self.device or "cpu"
             print(
                 f"[embeddings] Loading local embedding model={self.model_name} on device={model_device}",
@@ -93,6 +125,11 @@ class EmbeddingGenerator:
     def embed_text(self, text: str) -> np.ndarray:
         if self.provider == "openai":
             return self.embed_batch([text])[0]
+        if self.provider == "bedrock":
+            return self._embed_with_bedrock(
+                [text],
+                input_type=os.getenv("BEDROCK_EMBEDDING_INPUT_TYPE_QUERY", "search_query"),
+            )[0]
         if self.provider == "vertex_ai":
             return self._embed_with_vertex(
                 [text],
@@ -119,13 +156,18 @@ class EmbeddingGenerator:
             if progress_callback:
                 progress_callback(len(texts), len(texts))
             return np.array(embeddings, dtype="float32")
+        if self.provider == "bedrock":
+            return self._embed_batch_with_bedrock(
+                texts=texts,
+                batch_size=batch_size,
+                progress_callback=progress_callback,
+            )
         if self.provider == "vertex_ai":
             return self._embed_batch_with_vertex(
                 texts=texts,
                 batch_size=batch_size,
                 progress_callback=progress_callback,
             )
-
         effective_batch_size = max(1, batch_size or self.batch_size)
         all_embeddings = []
         total = len(texts)
@@ -192,6 +234,43 @@ class EmbeddingGenerator:
 
         return np.vstack(all_embeddings).astype("float32")
 
+    def _embed_batch_with_bedrock(
+        self,
+        texts: List[str],
+        batch_size: int = None,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+    ) -> np.ndarray:
+        effective_batch_size = max(1, batch_size or self.batch_size)
+        all_embeddings = []
+        total = len(texts)
+        document_input_type = os.getenv("BEDROCK_EMBEDDING_INPUT_TYPE_DOCUMENT", "search_document")
+
+        for start in range(0, total, effective_batch_size):
+            batch = texts[start : start + effective_batch_size]
+            batch_number = (start // effective_batch_size) + 1
+            total_batches = (total + effective_batch_size - 1) // effective_batch_size
+            print(
+                f"[embeddings] Bedrock batch {batch_number}/{total_batches} "
+                f"items={len(batch)} progress={start}/{total}",
+                flush=True,
+            )
+            started_at = time.perf_counter()
+            batch_embeddings = self._embed_with_bedrock(
+                batch,
+                input_type=document_input_type,
+            )
+            all_embeddings.append(batch_embeddings)
+            elapsed = time.perf_counter() - started_at
+            print(
+                f"[embeddings] Finished Bedrock batch {batch_number}/{total_batches} "
+                f"elapsed={elapsed:.2f}s progress={min(start + len(batch), total)}/{total}",
+                flush=True,
+            )
+            if progress_callback:
+                progress_callback(min(start + len(batch), total), total)
+
+        return np.vstack(all_embeddings).astype("float32")
+
     def _embed_with_vertex(self, texts: List[str], task_type: str) -> np.ndarray:
         config = {
             "task_type": task_type,
@@ -221,6 +300,34 @@ class EmbeddingGenerator:
             raise RuntimeError("Vertex AI embeddings response could not be parsed.")
 
         return np.array(values, dtype="float32")
+
+    def _embed_with_bedrock(self, texts: List[str], input_type: str) -> np.ndarray:
+        response = self.bedrock_client.invoke_model(
+            modelId=self.model_name,
+            contentType="application/json",
+            accept="application/json",
+            body=json.dumps(self._build_bedrock_embedding_request(texts, input_type)),
+        )
+        payload = json.loads(response["body"].read())
+        embeddings = payload.get("embeddings")
+
+        if isinstance(embeddings, dict):
+            embeddings = embeddings.get("float")
+
+        if not embeddings:
+            raise RuntimeError("Bedrock embeddings returned an empty response.")
+
+        return np.array(embeddings, dtype="float32")
+
+    def _build_bedrock_embedding_request(self, texts: List[str], input_type: str) -> dict:
+        payload = {
+            "texts": texts,
+            "input_type": input_type,
+            "embedding_types": ["float"],
+        }
+        if self.bedrock_output_dimensionality:
+            payload["output_dimension"] = self.bedrock_output_dimensionality
+        return payload
 
     def _encode_with_backoff(
         self,
@@ -266,12 +373,14 @@ class EmbeddingGenerator:
             return configured_provider
         if self._is_hf_space() or self._is_test_context():
             return "local"
-        return "vertex_ai"
+        return "bedrock"
 
     def _resolve_model_name(self) -> str:
         explicit_model = os.getenv("EMBEDDING_MODEL")
         if explicit_model:
             return explicit_model
+        if self.provider == "bedrock":
+            return os.getenv("BEDROCK_EMBEDDING_MODEL", "cohere.embed-v4:0")
         if self.provider == "vertex_ai":
             return os.getenv("VERTEX_EMBEDDING_MODEL", "gemini-embedding-001")
         if self._is_hf_space() or self._is_test_context():

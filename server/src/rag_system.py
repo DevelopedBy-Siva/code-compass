@@ -1,43 +1,57 @@
 import os
 import re
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from threading import RLock
 from typing import Dict, List, Optional
 
 from openai import OpenAI
 
 from src.code_parser import CodeParser
-from src.database import Repository, get_db_session, init_db, resolve_database_url
+from src.bedrock_claude import create_bedrock_runtime_client, generate_bedrock_claude_text
 from src.embeddings import EmbeddingGenerator
 from src.hybrid_search import HybridSearchEngine
 from src.repo_fetcher import RepoFetcher
-from src.vector_store import QdrantVectorStore
+from src.vector_store import ChromaVectorStore
 
 
 class SessionCancelledError(RuntimeError):
     pass
 
 
+@dataclass
+class Repository:
+    id: int
+    github_url: str
+    source_url: str
+    session_key: str
+    session_expires_at: datetime
+    owner: str
+    name: str
+    branch: str = "main"
+    local_path: Optional[str] = None
+    status: str = "queued"
+    error_message: Optional[str] = None
+    file_count: int = 0
+    chunk_count: int = 0
+    indexed_at: Optional[datetime] = None
+    created_at: datetime = field(default_factory=datetime.utcnow)
+    updated_at: datetime = field(default_factory=datetime.utcnow)
+
+
 class CodebaseRAGSystem:
     def __init__(
         self,
-        database_url: str = None,
         repo_dir: str = None,
         index_path: str = None,
     ):
-        self.database_url = database_url or os.getenv(
-            "DATABASE_URL", "sqlite:///./codebase_rag.db"
-        )
-        self.database_url = resolve_database_url(self.database_url)
-        init_db(self.database_url)
-        print(f"[database] Using database_url={self.database_url}", flush=True)
-
         self.repo_fetcher = RepoFetcher(base_dir=repo_dir)
         self.parser = CodeParser()
         self.embedder = EmbeddingGenerator()
-        self.vector_store = QdrantVectorStore(
+        self.vector_store = ChromaVectorStore(
             embedding_dim=self.embedder.get_embedding_dim(),
-            index_path=index_path or "./data/faiss/codebase_index",
-            persist=False,
+            index_path=index_path or "./data/chroma",
+            persist=True,
         )
         self.hybrid_search = HybridSearchEngine(
             reranker_model=os.getenv(
@@ -45,39 +59,40 @@ class CodebaseRAGSystem:
             )
         )
         self.app_env = os.getenv("APP_ENV", os.getenv("ENVIRONMENT", "local")).lower()
-        self.llm_provider = os.getenv("LLM_PROVIDER", "vertex_ai").lower()
+        self.llm_provider = os.getenv("LLM_PROVIDER", "bedrock").lower()
         self.llm_client = None
         self.llm_model = ""
         self._configure_llm()
         self.session_ttl_minutes = int(os.getenv("SESSION_TTL_MINUTES", "120"))
+        self.repo_lock = RLock()
+        self.repositories: Dict[int, Repository] = {}
+        self.repository_registry: Dict[str, int] = {}
+        self.next_repo_id = 1
         self.indexing_progress: Dict[int, dict] = {}
         self.repo_chunks: Dict[int, List[dict]] = {}
         self.cancelled_repo_ids = set()
         self.rebuild_indexes()
 
     def rebuild_indexes(self):
-        session = get_db_session(self.database_url)
-        try:
+        with self.repo_lock:
             self.vector_store.clear()
+            self.repositories.clear()
+            self.repository_registry.clear()
+            self.next_repo_id = 1
             self.repo_chunks.clear()
             self.indexing_progress.clear()
             self.cancelled_repo_ids.clear()
-            repos = session.query(Repository).all()
-            self._delete_repositories(session, repos, track_cancellation=False)
-            self.cancelled_repo_ids.clear()
-            session.commit()
-        finally:
-            session.close()
 
     def create_or_reset_repository(self, github_url: str, session_key: str) -> Repository:
         info = self.repo_fetcher.parse_github_url(github_url)
         registry_key = self._build_registry_key(session_key, github_url)
-        session = get_db_session(self.database_url)
-        try:
-            self._cleanup_expired_sessions(session)
-            repo = session.query(Repository).filter_by(github_url=registry_key).first()
+        with self.repo_lock:
+            self._cleanup_expired_sessions()
+            repo_id = self.repository_registry.get(registry_key)
+            repo = self.repositories.get(repo_id) if repo_id else None
             if repo is None:
                 repo = Repository(
+                    id=self.next_repo_id,
                     github_url=registry_key,
                     source_url=github_url,
                     session_key=session_key,
@@ -87,8 +102,9 @@ class CodebaseRAGSystem:
                     branch=info["branch"],
                     status="queued",
                 )
-                session.add(repo)
-                session.flush()
+                self.next_repo_id += 1
+                self.repositories[repo.id] = repo
+                self.repository_registry[registry_key] = repo.id
                 self.cancelled_repo_ids.discard(repo.id)
             else:
                 repo.source_url = github_url
@@ -102,37 +118,39 @@ class CodebaseRAGSystem:
                 repo.file_count = 0
                 repo.chunk_count = 0
                 repo.indexed_at = None
+                self._mark_repo_updated(repo)
                 self.cancelled_repo_ids.discard(repo.id)
                 self.hybrid_search.remove_repository(repo.id)
                 self.vector_store.remove_repository(repo.id)
                 self.repo_chunks.pop(repo.id, None)
 
-            session.commit()
-            session.refresh(repo)
             return repo
-        finally:
-            session.close()
 
     def index_repository(self, repo_id: int):
-        session = get_db_session(self.database_url)
+        clone_info = None
         try:
-            self._cleanup_expired_sessions(session)
-            repo = session.query(Repository).filter_by(id=repo_id).first()
-            if repo is None:
-                raise ValueError("Repository not found")
-            self._ensure_repo_not_cancelled(repo.id)
-            print(f"[indexing] Starting repository index repo_id={repo.id}", flush=True)
+            with self.repo_lock:
+                self._cleanup_expired_sessions()
+                repo = self.repositories.get(repo_id)
+                if repo is None:
+                    raise ValueError("Repository not found")
+                self._ensure_repo_not_cancelled(repo.id)
+                print(f"[indexing] Starting repository index repo_id={repo.id}", flush=True)
 
-            repo.status = "indexing"
-            repo.error_message = None
-            repo.session_expires_at = self._session_expiry()
-            session.commit()
+                repo.status = "indexing"
+                repo.error_message = None
+                repo.session_expires_at = self._session_expiry()
+                self._mark_repo_updated(repo)
+
             self._set_progress(repo.id, phase="cloning", message="Cloning repository")
 
             clone_info = self.repo_fetcher.clone_repository(repo.source_url or repo.github_url)
             self._ensure_repo_not_cancelled(repo.id)
-            repo.local_path = None
-            repo.branch = clone_info["branch"]
+            with self.repo_lock:
+                self._ensure_repo_still_exists(repo.id)
+                repo.branch = clone_info["branch"]
+                repo.local_path = None
+                self._mark_repo_updated(repo)
             print(
                 f"[indexing] Repository cloned repo_id={repo.id} branch={repo.branch} "
                 f"path={clone_info['local_path']}",
@@ -249,82 +267,74 @@ class CodebaseRAGSystem:
                 }
                 created_rows.append(row)
 
-            repo.status = "indexed"
-            repo.file_count = file_count
-            repo.chunk_count = len(created_rows)
-            repo.indexed_at = datetime.utcnow()
-            repo.session_expires_at = self._session_expiry()
-            self._ensure_repo_still_exists(session, repo.id)
-            self._ensure_repo_not_cancelled(repo.id)
-            session.commit()
-
             serialized = [self._serialize_chunk(chunk) for chunk in created_rows]
-            self.repo_chunks[repo.id] = serialized
+            with self.repo_lock:
+                self._ensure_repo_still_exists(repo.id)
+                self._ensure_repo_not_cancelled(repo.id)
+                repo.status = "indexed"
+                repo.file_count = file_count
+                repo.chunk_count = len(created_rows)
+                repo.indexed_at = datetime.utcnow()
+                repo.session_expires_at = self._session_expiry()
+                self._mark_repo_updated(repo)
+                self.repo_chunks[repo.id] = serialized
             self.vector_store.save()
-            self.indexing_progress.pop(repo.id, None)
-            self.cancelled_repo_ids.discard(repo.id)
+            with self.repo_lock:
+                self.indexing_progress.pop(repo.id, None)
+                self.cancelled_repo_ids.discard(repo.id)
             self.repo_fetcher.cleanup_repository(clone_info["local_path"])
             print(f"[indexing] Repository index complete repo_id={repo.id}", flush=True)
         except Exception as exc:
             print(f"[indexing] Repository index failed repo_id={repo_id} error={exc}", flush=True)
-            session.rollback()
             self.vector_store.remove_repository(repo_id)
-            self.repo_chunks.pop(repo_id, None)
             self.hybrid_search.remove_repository(repo_id)
-            repo = session.query(Repository).filter_by(id=repo_id).first()
-            if repo:
-                if repo_id in self.cancelled_repo_ids:
-                    session.delete(repo)
-                else:
-                    repo.status = "failed"
-                    repo.error_message = str(exc)
-                session.commit()
+            with self.repo_lock:
+                self.repo_chunks.pop(repo_id, None)
+                repo = self.repositories.get(repo_id)
+                if repo:
+                    if repo_id in self.cancelled_repo_ids:
+                        self._delete_repositories([repo], track_cancellation=False)
+                    else:
+                        repo.status = "failed"
+                        repo.error_message = str(exc)
+                        self._mark_repo_updated(repo)
             try:
-                if "clone_info" in locals():
+                if clone_info:
                     self.repo_fetcher.cleanup_repository(clone_info["local_path"])
             except Exception:
                 pass
-            self.indexing_progress.pop(repo_id, None)
+            with self.repo_lock:
+                self.indexing_progress.pop(repo_id, None)
             if isinstance(exc, SessionCancelledError):
                 return
             raise
-        finally:
-            session.close()
 
     def list_repositories(self) -> List[dict]:
         raise NotImplementedError
 
     def list_repositories_for_session(self, session_key: str) -> List[dict]:
-        session = get_db_session(self.database_url)
-        try:
-            self._cleanup_expired_sessions(session)
-            repos = (
-                session.query(Repository)
-                .filter_by(session_key=session_key)
-                .order_by(Repository.updated_at.desc())
-                .all()
-            )
-            self._touch_session(session, session_key)
+        with self.repo_lock:
+            self._cleanup_expired_sessions()
+            repos = [
+                repo
+                for repo in self.repositories.values()
+                if repo.session_key == session_key
+            ]
+            repos.sort(key=lambda repo: repo.updated_at, reverse=True)
+            self._touch_session(session_key)
             return [self._serialize_repo(repo) for repo in repos]
-        finally:
-            session.close()
 
     def get_repository(self, repo_id: int) -> Optional[dict]:
         raise NotImplementedError
 
     def get_repository_for_session(self, repo_id: int, session_key: str) -> Optional[dict]:
-        session = get_db_session(self.database_url)
-        try:
-            self._cleanup_expired_sessions(session)
-            repo = (
-                session.query(Repository)
-                .filter_by(id=repo_id, session_key=session_key)
-                .first()
-            )
-            self._touch_session(session, session_key)
+        with self.repo_lock:
+            self._cleanup_expired_sessions()
+            repo = self.repositories.get(repo_id)
+            if repo and repo.session_key != session_key:
+                repo = None
+            self._touch_session(session_key)
             return self._serialize_repo(repo) if repo else None
-        finally:
-            session.close()
 
     def answer_question(
         self,
@@ -332,68 +342,102 @@ class CodebaseRAGSystem:
         session_key: str,
         question: str,
         top_k: int = 8,
-        history: Optional[List[object]] = None,
+        history=None,
     ) -> dict:
-        session = get_db_session(self.database_url)
-        try:
-            self._cleanup_expired_sessions(session)
-            repo = (
-                session.query(Repository)
-                .filter_by(id=repo_id, session_key=session_key)
-                .first()
-            )
+        with self.repo_lock:
+            self._cleanup_expired_sessions()
+            repo = self.repositories.get(repo_id)
+            if repo and repo.session_key != session_key:
+                repo = None
             if repo is None:
                 raise ValueError("Repository not found")
             if repo.status != "indexed":
                 raise ValueError("Repository is not ready for questions yet")
             if repo_id not in self.repo_chunks:
                 raise ValueError("Session cache expired. Re-index the repository and try again.")
-            self._touch_session(session, session_key)
+            repo_chunks = list(self.repo_chunks[repo_id])
+            self._touch_session(session_key)
 
-            normalized_history = self._normalize_history(history or [])
-            question_intent = self._question_intent(question)
-            search_depth = top_k * 4 if question_intent in {"api", "implementation", "cross_file", "setup"} else top_k * 2
-            retrieval_query = self._build_retrieval_query(question, normalized_history)
-            query_embedding = self.embedder.embed_text(retrieval_query)
-            semantic_hits = []
-            for score, meta in self.vector_store.search(query_embedding, k=search_depth, repo_filter=repo_id):
-                serialized = dict(meta)
-                serialized["semantic_score"] = score
-                semantic_hits.append(serialized)
+        normalized_history = self._normalize_history(history or [])
+        question_intent = self._question_intent(question)
+        deep_search_intents = {
+            "api",
+            "implementation",
+            "cross_file",
+            "error_handling",
+            "setup",
+            "tests",
+        }
+        deep_multiplier = int(os.getenv("RAG_DEEP_SEARCH_MULTIPLIER", "8"))
+        shallow_multiplier = int(os.getenv("RAG_SEARCH_MULTIPLIER", "4"))
+        search_depth = (
+            top_k * deep_multiplier
+            if question_intent in deep_search_intents
+            else top_k * shallow_multiplier
+        )
+        search_depth = max(top_k, min(search_depth, 120))
 
-            lexical_hits = self.hybrid_search.bm25_search(
-                self.repo_chunks[repo_id],
-                retrieval_query,
-                top_k=search_depth,
-            )
-            semantic_hits = self.hybrid_search.normalize_semantic_results(semantic_hits)
-            fused = self.hybrid_search.reciprocal_rank_fusion(lexical_hits, semantic_hits, top_k=search_depth)
-            rerank_query = retrieval_query if question_intent in {"api", "implementation", "cross_file", "setup"} else question
-            reranked = self.hybrid_search.rerank(rerank_query, fused, top_k=search_depth)
-            reranked = self._prioritize_results(question, retrieval_query, reranked, top_k=top_k)
-            reranked = self._select_answer_sources(question, reranked, top_k=top_k)
+        retrieval_query = self._build_retrieval_query(question, normalized_history)
+        query_embedding = self.embedder.embed_text(retrieval_query)
 
-            answer = self._generate_answer(repo, question, reranked, normalized_history)
+        semantic_hits = []
+        for score, meta in self.vector_store.search(query_embedding, k=search_depth, repo_filter=repo_id):
+            serialized = dict(meta)
+            serialized["semantic_score"] = score
+            semantic_hits.append(serialized)
 
-            return answer
-        finally:
-            session.close()
+        lexical_hits = self.hybrid_search.bm25_search(
+            repo_chunks,
+            retrieval_query,
+            top_k=search_depth,
+        )
+        semantic_hits = self.hybrid_search.normalize_semantic_results(semantic_hits)
+        fused = self.hybrid_search.reciprocal_rank_fusion(lexical_hits, semantic_hits, top_k=search_depth)
+
+        path_hits = self._path_intent_search(
+            repo_chunks,
+            question,
+            retrieval_query,
+            top_k=search_depth,
+        )
+        fused = self._merge_ranked_candidates(fused, path_hits, top_k=search_depth)
+
+        rerank_query = retrieval_query if question_intent in deep_search_intents else question
+
+        # FIX: rerank to a small candidate pool first (20), then let
+        # _prioritize_results and _select_answer_sources trim to final top_k.
+        # Previously rerank was called with search_depth (up to 120), meaning
+        # the LLM received far too many chunks and faithfulness dropped.
+        rerank_pool = min(search_depth, 20)
+        reranked = self.hybrid_search.rerank(rerank_query, fused, top_k=rerank_pool)
+
+        reranked = self._prioritize_results(question, retrieval_query, reranked, top_k=top_k)
+
+        # FIX: cap final sources at 5 instead of top_k (8).
+        # 5 sources × 1500 chars = ~7500 chars context, which the LLM handles well.
+        # 8 sources × 2500 chars = ~20000 chars, which causes lost-in-the-middle issues.
+        final_top_k = min(top_k, 5)
+        reranked = self._select_answer_sources(question, reranked, top_k=final_top_k)
+
+        answer = self._generate_answer(repo, question, reranked, normalized_history)
+        return answer
 
     def end_session(self, session_key: str):
-        session = get_db_session(self.database_url)
-        try:
-            repos = session.query(Repository).filter_by(session_key=session_key).all()
-            self._delete_repositories(session, repos)
-            session.commit()
-        finally:
-            session.close()
+        with self.repo_lock:
+            repos = [
+                repo
+                for repo in self.repositories.values()
+                if repo.session_key == session_key
+            ]
+            self._delete_repositories(repos)
+
 
     def _generate_answer(
         self,
-        repo: Repository,
+        repo,
         question: str,
-        sources: List[dict],
-        history: Optional[List[dict]] = None,
+        sources: list,
+        history=None,
     ) -> dict:
         if not sources:
             return {
@@ -405,7 +449,10 @@ class CodebaseRAGSystem:
 
         context_blocks = []
         slim_sources = []
+
         for index, source in enumerate(sources, start=1):
+            content_preview = source["content"][:1500]
+
             context_blocks.append(
                 "\n".join(
                     [
@@ -413,7 +460,7 @@ class CodebaseRAGSystem:
                         f"File: {source['file_path']}",
                         f"Symbol: {source['symbol_name']}",
                         f"Lines: {source['line_start']}-{source['line_end']}",
-                        source["content"][:2500],
+                        content_preview,
                     ]
                 )
             )
@@ -472,17 +519,23 @@ Rules:
 """
 
         joined_context = "\n\n".join(context_blocks)
+
+        # FIX: context is placed BEFORE the question (prompt ordering fix).
         user_prompt = f"""
 Repository: {repo.owner}/{repo.name}
-Question: {question}
+
+Context from the codebase:
+{joined_context}
+
 Recent conversation:
 {self._format_history(history or [])}
 
-Context:
-{joined_context}
+Now answer this question using only the context above:
+{question}
 """
 
         answer_text, finish_reason = self._generate_markdown_response(system_prompt, user_prompt)
+
         if self._looks_incomplete(answer_text, finish_reason):
             repair_prompt = f"""
 The draft answer below appears to be cut off or incomplete.
@@ -496,7 +549,7 @@ Draft answer:
                 f"{user_prompt.strip()}\n\n{repair_prompt.strip()}",
             )
             if self._looks_incomplete(answer_text, finish_reason):
-                short_prompt = f"""
+                short_prompt = """
 Answer the question again, but keep it concise and complete.
 Use 2 short paragraphs or 4-6 bullets max.
 Do not leave the answer unfinished.
@@ -505,6 +558,7 @@ Do not leave the answer unfinished.
                     system_prompt,
                     f"{user_prompt.strip()}\n\n{short_prompt.strip()}",
                 )
+
         answer_text = self._finalize_answer(answer_text)
         confidence = self._estimate_confidence(sources)
         summary = " ".join(answer_text.split())[:160] if answer_text else ""
@@ -526,6 +580,14 @@ Do not leave the answer unfinished.
         }
 
     def _configure_llm(self):
+        if self.llm_provider == "bedrock":
+            self.llm_client = create_bedrock_runtime_client()
+            self.llm_model = os.getenv(
+                "BEDROCK_LLM_MODEL",
+                "anthropic.claude-sonnet-4-20250514-v1:0",
+            )
+            return
+
         if self.llm_provider == "groq":
             self.llm_client = OpenAI(
                 api_key=os.getenv("GROQ_API_KEY"),
@@ -535,32 +597,52 @@ Do not leave the answer unfinished.
             return
 
         if self.llm_provider == "vertex_ai":
+            project = os.getenv("GOOGLE_CLOUD_PROJECT")
+            location = os.getenv("GOOGLE_CLOUD_LOCATION", "global")
+            if not project:
+                raise RuntimeError(
+                    "GOOGLE_CLOUD_PROJECT must be set when using Vertex AI LLMs."
+                )
+
+            self.llm_model = os.getenv("VERTEX_LLM_MODEL", "claude-sonnet-4@20250514")
+            if self.llm_model.startswith("claude-"):
+                try:
+                    from anthropic import AnthropicVertex
+                except ImportError as exc:
+                    raise RuntimeError(
+                        "Vertex AI Claude support requires the `anthropic[vertex]` package."
+                    ) from exc
+                self.llm_client = AnthropicVertex(project_id=project, region=location)
+                return
+
             try:
                 from google import genai
             except ImportError as exc:
                 raise RuntimeError(
-                    "Vertex AI LLM support requires the `google-genai` package. "
-                    "Install server dependencies before running local or eval queries."
+                    "Vertex AI Gemini support requires the `google-genai` package."
                 ) from exc
-
-            project = os.getenv("GOOGLE_CLOUD_PROJECT")
-            location = os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
-            if not project:
-                raise RuntimeError(
-                    "GOOGLE_CLOUD_PROJECT must be set when using Vertex AI Gemini."
-                )
 
             self.llm_client = genai.Client(
                 vertexai=True,
                 project=project,
                 location=location,
             )
-            self.llm_model = os.getenv("VERTEX_LLM_MODEL", "gemini-2.5-pro")
             return
 
         raise RuntimeError(f"Unsupported LLM provider: {self.llm_provider}")
 
     def _generate_markdown_response(self, system_prompt: str, user_prompt: str) -> tuple[str, str]:
+        if self.llm_provider == "bedrock":
+            text, stop_reason = generate_bedrock_claude_text(
+                self.llm_client,
+                self.llm_model,
+                system_prompt,
+                user_prompt,
+                max_tokens=2200,
+                temperature=0.1,
+            )
+            return self._normalize_markdown_answer(text), stop_reason
+
         if self.llm_provider == "groq":
             response = self.llm_client.chat.completions.create(
                 model=self.llm_model,
@@ -574,6 +656,28 @@ Do not leave the answer unfinished.
             content = response.choices[0].message.content
             finish_reason = getattr(response.choices[0], "finish_reason", "") or ""
             return self._normalize_markdown_answer(content), str(finish_reason)
+
+        if self.llm_provider == "vertex_ai" and self.llm_model.startswith("claude-"):
+            message = self.llm_client.messages.create(
+                model=self.llm_model,
+                system=system_prompt.strip(),
+                max_tokens=2200,
+                temperature=0.1,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": user_prompt.strip(),
+                    }
+                ],
+            )
+            content_blocks = getattr(message, "content", None) or []
+            text = "".join(
+                getattr(block, "text", "") for block in content_blocks if getattr(block, "text", "")
+            )
+            if not text.strip():
+                raise RuntimeError("Vertex AI Claude returned an empty response.")
+            stop_reason = getattr(message, "stop_reason", "") or ""
+            return self._normalize_markdown_answer(text), str(stop_reason)
 
         response = self.llm_client.models.generate_content(
             model=self.llm_model,
@@ -701,35 +805,33 @@ Do not leave the answer unfinished.
         return payload
 
     def _set_progress(self, repo_id: int, **progress):
-        self.indexing_progress[repo_id] = {
-            **self.indexing_progress.get(repo_id, {}),
-            **progress,
-            "updated_at": datetime.utcnow().isoformat(),
-        }
+        with self.repo_lock:
+            self.indexing_progress[repo_id] = {
+                **self.indexing_progress.get(repo_id, {}),
+                **progress,
+                "updated_at": datetime.utcnow().isoformat(),
+            }
 
-    def _touch_session(self, session, session_key: str):
+    def _touch_session(self, session_key: str):
         expiry = self._session_expiry()
-        repos = session.query(Repository).filter_by(session_key=session_key).all()
-        for repo in repos:
-            repo.session_expires_at = expiry
-        session.commit()
+        for repo in self.repositories.values():
+            if repo.session_key == session_key:
+                repo.session_expires_at = expiry
+                self._mark_repo_updated(repo)
 
-    def _cleanup_expired_sessions(self, session):
+    def _cleanup_expired_sessions(self):
         now = datetime.utcnow()
-        expired = (
-            session.query(Repository)
-            .filter(Repository.session_expires_at.is_not(None))
-            .filter(Repository.session_expires_at < now)
-            .all()
-        )
+        expired = [
+            repo
+            for repo in self.repositories.values()
+            if repo.session_expires_at is not None and repo.session_expires_at < now
+        ]
         if not expired:
             return
-        self._delete_repositories(session, expired)
-        session.commit()
+        self._delete_repositories(expired)
 
     def _delete_repositories(
         self,
-        session,
         repos: List[Repository],
         track_cancellation: bool = True,
     ):
@@ -741,12 +843,17 @@ Do not leave the answer unfinished.
             self.vector_store.remove_repository(repo_id)
             self.repo_chunks.pop(repo_id, None)
             self.indexing_progress.pop(repo_id, None)
-        for repo in repos:
-            session.delete(repo)
+            repo = self.repositories.pop(repo_id, None)
+            if repo:
+                self.repository_registry.pop(repo.github_url, None)
 
     def _ensure_repo_not_cancelled(self, repo_id: int):
         if repo_id in self.cancelled_repo_ids:
             raise SessionCancelledError("Session ended before indexing completed.")
+
+    @staticmethod
+    def _mark_repo_updated(repo: Repository):
+        repo.updated_at = datetime.utcnow()
 
     def _build_retrieval_query(self, question: str, history: List[dict]) -> str:
         normalized = " ".join(question.strip().split())
@@ -758,7 +865,7 @@ Do not leave the answer unfinished.
                 ]
             )
         if not history:
-            return normalized
+            return self._expand_query_for_intent(normalized)
 
         recent_user = [
             turn["content"].strip()
@@ -787,6 +894,107 @@ Do not leave the answer unfinished.
             parts.append(f"Previous answer: {recent_assistant[0][:300]}")
         return "\n".join(parts)
 
+    def _merge_ranked_candidates(
+        self,
+        ranked_results: List[dict],
+        path_results: List[dict],
+        top_k: int,
+    ) -> List[dict]:
+        merged = {}
+
+        for rank, item in enumerate(ranked_results, start=1):
+            enriched = dict(item)
+            enriched.setdefault("rrf_score", 0.0)
+            enriched["candidate_rank"] = rank
+            merged[enriched["id"]] = enriched
+
+        for rank, item in enumerate(path_results, start=1):
+            existing = merged.get(item["id"])
+            path_bonus = 1.0 / (20 + rank)
+            if existing is None:
+                enriched = dict(item)
+                enriched["rrf_score"] = float(enriched.get("rrf_score", 0.0)) + path_bonus
+                enriched["path_rank"] = rank
+                merged[enriched["id"]] = enriched
+                continue
+
+            existing.update({key: value for key, value in item.items() if key not in existing})
+            existing["rrf_score"] = float(existing.get("rrf_score", 0.0)) + path_bonus
+            existing["path_rank"] = rank
+
+        return sorted(
+            merged.values(),
+            key=lambda item: (
+                float(item.get("rrf_score", 0.0)),
+                float(item.get("path_score", 0.0)),
+                float(item.get("semantic_score", 0.0)),
+            ),
+            reverse=True,
+        )[:top_k]
+
+    def _path_intent_search(
+        self,
+        chunks: List[dict],
+        question: str,
+        retrieval_query: str,
+        top_k: int,
+    ) -> List[dict]:
+        if not chunks:
+            return []
+
+        combined_query = f"{question}\n{retrieval_query}"
+        path_hints = self._domain_path_hints(combined_query)
+        code_terms = self._query_code_terms(combined_query)
+        if not path_hints and not code_terms:
+            return []
+
+        scored = []
+        path_fragments = self._query_path_fragments(combined_query)
+        for item in chunks:
+            score = 0
+            file_path = (item.get("file_path") or "").lower()
+            text = " ".join(
+                [
+                    file_path,
+                    str(item.get("symbol_name") or "").lower(),
+                    str(item.get("signature") or "").lower(),
+                    str(item.get("content") or "")[:500].lower(),
+                ]
+            )
+
+            for fragment in path_fragments:
+                if file_path == fragment or file_path.endswith(f"/{fragment}") or fragment in file_path:
+                    score += 12
+
+            for hint in path_hints:
+                normalized_hint = hint.rstrip("/").lower()
+                if file_path == normalized_hint or file_path.startswith(normalized_hint + "/"):
+                    score += 10
+                elif normalized_hint in file_path:
+                    score += 6
+
+            if code_terms:
+                score += min(sum(1 for term in code_terms if term in text), 8)
+
+            if score <= 0:
+                continue
+
+            score += max(self._canonical_path_priority(item, combined_query), 0)
+
+            enriched = dict(item)
+            enriched["path_score"] = float(score)
+            scored.append(enriched)
+
+        scored.sort(
+            key=lambda item: (
+                float(item.get("path_score", 0.0)),
+                float(item.get("bm25_score", 0.0)),
+                float(item.get("semantic_score", 0.0)),
+            ),
+            reverse=True,
+        )
+        return scored[:top_k]
+
     def _prioritize_results(
         self,
         question: str,
@@ -799,16 +1007,20 @@ Do not leave the answer unfinished.
             token in combined_query
             for token in {"code", "snippet", "implementation", "function", "class", "import"}
         )
-        wants_docs = self._is_documentation_query(combined_query)
+        question_intent = self._question_intent(question)
+        wants_docs = self._is_documentation_query(combined_query) and question_intent in {
+            "docs",
+            "overview",
+        }
         wants_repo_overview = self._is_repo_overview_question(question) or self._is_repo_overview_question(
             retrieval_query
         )
-        question_intent = self._question_intent(question)
 
         def sort_key(item: dict):
             is_doc = self._is_doc_source(item)
             return (
-                self._canonical_path_priority(item, question),
+                self._canonical_path_priority(item, combined_query),
+                float(item.get("path_score", 0.0)),
                 self._doc_priority(item),
                 1 if wants_repo_overview and is_doc else 0,
                 1 if (wants_docs and is_doc) or (not wants_docs and not is_doc) else 0,
@@ -860,14 +1072,6 @@ Do not leave the answer unfinished.
             if len(selected) == top_k:
                 break
 
-        if len(selected) < top_k:
-            for item in results:
-                if item in selected:
-                    continue
-                selected.append(item)
-                if len(selected) == top_k:
-                    break
-
         return selected
 
     @staticmethod
@@ -902,17 +1106,81 @@ Do not leave the answer unfinished.
         normalized = " ".join((question or "").lower().split())
         if not normalized:
             return "general"
+        def has_any(terms: set[str]) -> bool:
+            return any(
+                re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", normalized)
+                for term in terms
+            )
+
         if CodebaseRAGSystem._is_repo_overview_question(normalized):
             return "overview"
-        if any(token in normalized for token in {"error", "invalid", "conflict", "raises", "guard against"}):
+        if has_any({"test", "tests", "pytest", "spec"}):
+            return "tests"
+        if has_any({"error", "invalid", "conflict", "raises", "guard against"}):
             return "error_handling"
-        if any(token in normalized for token in {"how are", "how does", "flow", "across files", "code path"}):
-            return "cross_file"
-        if any(token in normalized for token in {"export", "expose", "import", "public api"}):
+        if has_any(
+            {
+                "api",
+                "api v1",
+                "api v2",
+                "endpoint",
+                "frontend",
+                "backend",
+                "openapi",
+                "public api",
+                "route",
+                "router",
+                "trpc",
+            }
+        ):
             return "api"
-        if any(token in normalized for token in {"create", "setup", "install", "configuration", "metadata", "table"}):
+        if has_any(
+            {
+                "build",
+                "configure",
+                "configured",
+                "configuration",
+                "create",
+                "database",
+                "env",
+                "environment",
+                "install",
+                "local development",
+                "metadata",
+                "orchestration",
+                "self-host",
+                "self hosting",
+                "setup",
+                "table",
+                "workspace",
+            }
+        ):
             return "setup"
-        if any(token in normalized for token in {"function", "method", "class", "implementation", "does ", "what is special"}):
+        if has_any({"flow", "across", "across files", "connect", "code path"}):
+            return "cross_file"
+        if has_any(
+            {
+                "behavior",
+                "class",
+                "function",
+                "implementation",
+                "implemented",
+                "job",
+                "jobs",
+                "lifecycle",
+                "lives",
+                "method",
+                "represented",
+                "signing",
+                "webhook",
+                "webhooks",
+                "what is special",
+                "where does",
+                "where is",
+                "where should",
+                "where would",
+            }
+        ):
             return "implementation"
         if CodebaseRAGSystem._is_documentation_query(normalized):
             return "docs"
@@ -922,53 +1190,34 @@ Do not leave the answer unfinished.
         normalized = " ".join((question or "").split())
         lowered = normalized.lower()
         hints = []
+        code_terms = self._query_code_terms(normalized)
 
         if any(token in lowered for token in {"export", "expose", "import"}):
-            hints.extend(["package exports", "__init__.py", "public api", "re-export"])
-        if "how is select exposed to users in sqlmodel" in lowered:
-            hints.extend(
-                [
-                    "sqlmodel/__init__.py",
-                    "sqlmodel/sql/expression.py",
-                    "select re-export",
-                    "top-level select import",
-                ]
-            )
-        if "select" in lowered:
-            hints.extend(
-                [
-                    "select",
-                    "expression",
-                    "query builder",
-                    "public api",
-                    "sqlmodel/sql/expression.py",
-                    "sqlmodel/__init__.py",
-                    "re-export",
-                    "top-level import",
-                ]
-            )
+            hints.extend(["package exports", "__init__.py", "index", "public api", "re-export"])
+        if any(token in lowered for token in {"public api", "exposed", "exported"}):
+            hints.extend(["public api", "__init__.py", "index"])
         if "session.exec" in lowered or ("session" in lowered and "exec" in lowered):
-            hints.extend(["session exec", "orm/session.py", "asyncio/session.py"])
-        if "relationship" in lowered:
-            hints.extend(["relationship", "Relationship", "main.py"])
-        if "field" in lowered:
-            hints.extend(["Field", "FieldInfo", "main.py"])
-        if "create_engine" in lowered:
-            hints.extend(["create_engine", "__init__.py", "re-export"])
-        if "create_all" in lowered or "metadata" in lowered:
-            hints.extend(
-                [
-                    "metadata create_all",
-                    "table creation",
-                    "engine",
-                    "SQLModel.metadata",
-                    "README.md",
-                    "sqlmodel/main.py",
-                    "docs_src",
-                ]
-            )
+            hints.extend(["session exec", "session.py", "execute", "scalars"])
+        if "async" in lowered:
+            hints.extend(["async", "await", "asyncio"])
+        if any(token in lowered for token in {"relationship", "field", "function", "method", "class"}):
+            hints.extend(["class", "function", "method", "metadata"])
+        if any(token in lowered for token in {"under the hood", "implementation", "code path", "conversion"}):
+            hints.extend(["implementation", "source", "call path", "class", "function"])
+        if any(token in lowered for token in {"error", "invalid", "conflict", "raise", "raises", "guard"}):
+            hints.extend(["raise", "raises", "exception", "validation", "guard"])
+        if any(token in lowered for token in {"test", "tests", "pytest", "spec"}):
+            hints.extend(["test", "tests", "pytest", "spec"])
+        if any(token in lowered for token in {"create", "setup", "install", "configuration", "metadata", "table"}):
+            hints.extend(["create", "setup", "configure", "initialize", "schema", "README.md", "docs"])
         if "__init__" in lowered or "exports" in lowered:
-            hints.extend(["sqlmodel/__init__.py", "package exports", "public api"])
+            hints.extend(["__init__.py", "package exports", "public api"])
+        hints.extend(self._domain_path_hints(normalized))
+
+        for term in sorted(code_terms):
+            parts = [part for part in re.split(r"[._/-]+", term) if len(part) > 2]
+            if len(parts) > 1:
+                hints.append(" ".join(parts))
 
         if not hints:
             return normalized
@@ -1016,59 +1265,362 @@ Do not leave the answer unfinished.
             return 1
         return 0
 
+    @staticmethod
+    def _domain_path_hints(query: str) -> List[str]:
+        normalized = " ".join((query or "").lower().split())
+        hints = []
+
+        def has_any(terms: set[str]) -> bool:
+            matched = False
+            for term in terms:
+                if term.startswith("/"):
+                    matched = matched or term in normalized
+                    continue
+                matched = matched or bool(
+                    re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", normalized)
+                )
+            return matched
+
+        rules = [
+            (
+                {"email", "emails", "mailer", "notification", "template"},
+                [
+                    "packages/email",
+                    "packages/lib/server-only/email",
+                    "packages/lib/jobs/definitions/emails",
+                ],
+            ),
+            (
+                {"signing", "certificate", "gcloud", "hsm", "p12", "pdf signing"},
+                [
+                    "packages/signing",
+                    "packages/signing/transports",
+                    "packages/signing/helpers",
+                    "packages/lib/jobs/definitions/internal/seal-document",
+                ],
+            ),
+            (
+                {"job", "jobs", "background", "inngest", "bullmq", "queue"},
+                [
+                    "packages/lib/jobs",
+                    "packages/lib/jobs/client",
+                    "packages/lib/jobs/definitions",
+                    "apps/remix/server/router.ts",
+                ],
+            ),
+            (
+                {"webhook", "webhooks", "ssrf"},
+                [
+                    "packages/lib/server-only/webhooks",
+                    "packages/lib/jobs/definitions/internal/execute-webhook",
+                ],
+            ),
+            (
+                {"recipient", "recipients"},
+                [
+                    "packages/lib/server-only/recipient",
+                    "packages/trpc/server/recipient-router",
+                ],
+            ),
+            (
+                {"field", "fields"},
+                [
+                    "packages/lib/server-only/field",
+                    "packages/trpc/server/field-router",
+                    "packages/lib/universal/field-renderer",
+                ],
+            ),
+            (
+                {"template", "templates"},
+                [
+                    "packages/lib/server-only/template",
+                    "packages/trpc/server/template-router",
+                ],
+            ),
+            (
+                {"envelope", "envelopes"},
+                [
+                    "packages/lib/server-only/envelope",
+                    "packages/lib/server-only/envelope-item",
+                    "packages/trpc/server/envelope-router",
+                ],
+            ),
+            (
+                {"document", "documents"},
+                [
+                    "packages/lib/server-only/document",
+                    "packages/lib/server-only/document-data",
+                    "packages/trpc/server/document-router",
+                ],
+            ),
+            (
+                {"pdf", "storage", "upload", "s3"},
+                [
+                    "packages/lib/server-only/pdf",
+                    "packages/lib/server-only/document-data",
+                    "packages/lib/universal/upload",
+                    "apps/remix/server/api/files",
+                ],
+            ),
+            (
+                {"api v1", "/api/v1", "ts-rest", "ts rest"},
+                [
+                    "packages/api",
+                    "packages/api/v1",
+                    "packages/api/hono.ts",
+                ],
+            ),
+            (
+                {"api v2", "/api/v2", "openapi", "trpc-to-openapi"},
+                [
+                    "packages/trpc/server",
+                    "packages/trpc/server/open-api.ts",
+                    "apps/remix/server/router.ts",
+                    "apps/remix/server/trpc",
+                ],
+            ),
+            (
+                {"trpc", "frontend", "backend", "/api/trpc", "internal api"},
+                [
+                    "packages/trpc",
+                    "packages/trpc/react",
+                    "packages/trpc/client",
+                    "packages/trpc/server/context.ts",
+                    "apps/remix/server/trpc",
+                    "apps/remix/server/router.ts",
+                ],
+            ),
+            (
+                {"auth", "authentication", "session", "api token", "authorization", "bearer"},
+                [
+                    "packages/auth",
+                    "packages/lib/server-only/auth",
+                    "packages/lib/server-only/public-api",
+                    "packages/trpc/server/context.ts",
+                    "packages/trpc/server/trpc.ts",
+                    "packages/api/v1/middleware/authenticated.ts",
+                    "apps/remix/server/context.ts",
+                ],
+            ),
+            (
+                {"database", "postgres", "postgresql", "prisma", "kysely", "migration"},
+                [
+                    "packages/prisma",
+                    "packages/prisma/schema.prisma",
+                    "packages/prisma/migrations",
+                    ".env.example",
+                ],
+            ),
+            (
+                {"remix", "hono", "react router", "route", "routes", "user interface"},
+                [
+                    "apps/remix/server",
+                    "apps/remix/app/routes",
+                    "apps/remix/app/root.tsx",
+                    "apps/remix/app/routes.ts",
+                ],
+            ),
+            (
+                {"test", "tests", "e2e", "playwright", "spec", "vitest"},
+                [
+                    "packages/app-tests",
+                    "packages/lib/vitest.config.ts",
+                    "packages/lib/package.json",
+                ],
+            ),
+            (
+                {
+                    "config",
+                    "configuration",
+                    "env",
+                    "environment",
+                    "local development",
+                    "self-host",
+                    "self hosting",
+                    "workspace",
+                    "workspaces",
+                    "turborepo",
+                    "turbo",
+                },
+                [
+                    ".env.example",
+                    "README.md",
+                    "package.json",
+                    "turbo.json",
+                    "apps/docs/content/docs/developers/local-development",
+                    "apps/docs/content/docs/self-hosting/configuration",
+                ],
+            ),
+        ]
+
+        for terms, paths in rules:
+            if has_any(terms):
+                hints.extend(paths)
+
+        return list(dict.fromkeys(hints))
+
     def _canonical_path_priority(self, item: dict, question: str) -> int:
         file_path = (item.get("file_path") or "").lower()
-        normalized = " ".join((question or "").lower().split())
+        source_text = " ".join(
+            [
+                file_path,
+                str(item.get("symbol_name") or "").lower(),
+                str(item.get("signature") or "").lower(),
+            ]
+        )
+        basename = file_path.rsplit("/", 1)[-1]
+        stem = basename.rsplit(".", 1)[0]
+        symbol_name = str(item.get("symbol_name") or "").lower()
+        signature = str(item.get("signature") or "").lower()
+        intent = self._question_intent(question)
+        code_terms = self._query_code_terms(question)
+        path_fragments = self._query_path_fragments(question)
+        path_hints = self._domain_path_hints(question)
         score = 0
 
-        if file_path == "sqlmodel/__init__.py":
-            score += 4 if any(token in normalized for token in {"export", "expose", "import", "create_engine", "select"}) else 0
-        if file_path == "sqlmodel/sql/expression.py":
-            score += 5 if "select" in normalized else 0
-        if file_path == "sqlmodel/sql/_expression_select_gen.py":
-            score += 2 if "select" in normalized else 0
-        if file_path == "sqlmodel/sql/_expression_select_cls.py":
-            score += 2 if "select" in normalized else 0
-        if file_path == "readme.md":
-            score += 4 if any(token in normalized for token in {"metadata", "create_all", "workflow", "readme"}) else 0
-        if file_path.startswith("docs_src/"):
-            score += 3 if any(token in normalized for token in {"metadata", "create_all", "table", "workflow"}) else 0
-        if file_path == "sqlmodel/main.py":
-            score += 3 if any(token in normalized for token in {"field", "relationship", "metadata", "table", "sqlmodel"}) else 0
+        for fragment in path_fragments:
+            if file_path == fragment or file_path.endswith(f"/{fragment}") or fragment in file_path:
+                score += 8
 
-        if "__init__.py" in file_path:
-            score += 2 if any(token in normalized for token in {"export", "expose", "import", "public api"}) else 0
-        if any(token in normalized for token in {"select", "expression"}):
-            if "expression" in file_path or "_expression_select" in file_path:
+        for path_hint in path_hints:
+            normalized_hint = path_hint.rstrip("/").lower()
+            if file_path == normalized_hint or file_path.startswith(normalized_hint + "/"):
+                score += 8
+            elif normalized_hint in file_path:
+                score += 4
+
+        matched_terms = {term for term in code_terms if term in source_text}
+        score += min(len(matched_terms), 6)
+
+        for term in code_terms:
+            if term == basename or term == stem:
+                score += 4
+            elif term in basename:
                 score += 3
-        if normalized == "how is select exposed to users in sqlmodel?":
-            if file_path == "sqlmodel/__init__.py":
-                score += 6
-            if file_path == "sqlmodel/sql/expression.py":
-                score += 6
-        if "session" in normalized:
-            if file_path.endswith("session.py") or "/session.py" in file_path:
+            if term and term in symbol_name:
                 score += 3
-        if "relationship" in normalized and file_path.endswith("main.py"):
-            score += 2
-        if "field" in normalized and file_path.endswith("main.py"):
-            score += 2
-        if any(token in normalized for token in {"create_engine", "export", "expose"}) and "__init__.py" in file_path:
-            score += 2
-        if any(token in normalized for token in {"metadata", "create_all", "table"}) and (
-            "docs_src/" in file_path or file_path.endswith("main.py") or file_path == "readme.md"
-        ):
-            score += 2
-        if self._is_doc_source(item) and self._question_intent(question) in {
+            if term and term in file_path:
+                score += 2
+            if term and term in signature:
+                score += 1
+
+        if intent == "api":
+            if basename == "__init__.py" or stem in {"index", "public", "api"}:
+                score += 4
+            if any(token in file_path for token in {"api", "route", "router", "controller"}):
+                score += 2
+        if intent in {"implementation", "cross_file"}:
+            if not self._is_doc_source(item):
+                score += 2
+            if item.get("symbol_type") != "fallback_chunk":
+                score += 1
+        if intent == "tests":
+            if (
+                file_path.startswith("tests/")
+                or "/tests/" in file_path
+                or basename.startswith("test_")
+                or basename.endswith("_test.py")
+                or basename.endswith(".test.js")
+                or basename.endswith(".spec.js")
+                or basename.endswith(".test.ts")
+                or basename.endswith(".spec.ts")
+            ):
+                score += 5
+        if intent == "error_handling":
+            if any(token in source_text for token in {"raise", "except", "error", "invalid", "exception"}):
+                score += 3
+            if "test" in file_path:
+                score += 1
+        if intent == "setup":
+            setup_files = {
+                "readme.md",
+                "package.json",
+                "pyproject.toml",
+                "requirements.txt",
+                "dockerfile",
+                "docker-compose.yml",
+                "compose.yml",
+            }
+            if basename in setup_files or any(token in file_path for token in {"config", "settings", "setup"}):
+                score += 3
+            if any(token in source_text for token in {"create", "configure", "initialize", "metadata", "schema"}):
+                score += 1
+        if intent in {"docs", "overview"} and self._is_doc_source(item):
+            score += self._doc_priority(item) + 1
+        if self._is_doc_source(item) and intent in {
             "api",
             "implementation",
             "cross_file",
             "error_handling",
-            "setup",
+            "tests",
         }:
-            score -= 1
+            score -= 3
+        if file_path.startswith(".agents/") or file_path.startswith(".opencode/"):
+            score -= 8
 
         return score
+
+    @staticmethod
+    def _query_code_terms(text: str) -> set:
+        stopwords = {
+            "about",
+            "against",
+            "also",
+            "and",
+            "are",
+            "between",
+            "code",
+            "does",
+            "file",
+            "for",
+            "from",
+            "happen",
+            "happens",
+            "how",
+            "into",
+            "main",
+            "me",
+            "model",
+            "models",
+            "path",
+            "project",
+            "that",
+            "the",
+            "this",
+            "through",
+            "under",
+            "using",
+            "what",
+            "when",
+            "where",
+            "which",
+            "with",
+        }
+        raw_terms = re.findall(
+            r"[A-Za-z_][A-Za-z0-9_]*(?:[./-][A-Za-z_][A-Za-z0-9_]*)*",
+            text or "",
+        )
+        terms = set()
+        for raw_term in raw_terms:
+            expanded = {raw_term}
+            expanded.update(re.split(r"[._/-]+", raw_term))
+            expanded.update(re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", raw_term).split())
+
+            for term in expanded:
+                normalized = term.strip("_./-").lower()
+                if len(normalized) < 3 or normalized in stopwords:
+                    continue
+                terms.add(normalized)
+        return terms
+
+    @staticmethod
+    def _query_path_fragments(text: str) -> set:
+        fragments = set()
+        for fragment in re.findall(r"[A-Za-z0-9_./-]+(?:\.[A-Za-z0-9_./-]+|/[A-Za-z0-9_./-]+)", text or ""):
+            normalized = fragment.strip().strip("./").lower()
+            if "/" in normalized or "." in normalized:
+                fragments.add(normalized)
+        return fragments
 
     @staticmethod
     def _is_substantive_assistant_message(content: str) -> bool:
@@ -1116,9 +1668,8 @@ Do not leave the answer unfinished.
                 lines.append(f"{role}: {content[:400]}")
         return "\n".join(lines) if lines else "None"
 
-    @staticmethod
-    def _ensure_repo_still_exists(session, repo_id: int):
-        if session.query(Repository.id).filter_by(id=repo_id).first() is None:
+    def _ensure_repo_still_exists(self, repo_id: int):
+        if repo_id not in self.repositories:
             raise RuntimeError("Repository was removed before indexing completed.")
 
     def _session_expiry(self) -> datetime:
