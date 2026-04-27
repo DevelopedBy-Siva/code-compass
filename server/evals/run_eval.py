@@ -3,6 +3,7 @@ import os
 import sys
 import asyncio
 import re
+import time
 from pathlib import Path
 from collections import Counter, defaultdict
 from statistics import mean
@@ -16,6 +17,7 @@ if str(SERVER_ROOT) not in sys.path:
 
 load_dotenv(SERVER_ROOT / ".env")
 
+from src.bedrock_claude import create_bedrock_runtime_client, generate_bedrock_claude_text
 from src.embeddings import EmbeddingGenerator
 
 
@@ -24,6 +26,8 @@ REPO_ID = int(os.getenv("CODEBASE_RAG_REPO_ID", "1"))
 SESSION_ID = os.getenv("CODEBASE_RAG_SESSION_ID", "eval-session")
 TOP_K = int(os.getenv("CODEBASE_RAG_TOP_K", "8"))
 QUERY_TIMEOUT_SECONDS = int(os.getenv("CODEBASE_RAG_QUERY_TIMEOUT_SECONDS", "180"))
+QUERY_MAX_RETRIES = int(os.getenv("CODEBASE_RAG_QUERY_MAX_RETRIES", "5"))
+QUERY_RETRY_BASE_SECONDS = float(os.getenv("CODEBASE_RAG_QUERY_RETRY_BASE_SECONDS", "2"))
 ENABLE_RAGAS = os.getenv("CODEBASE_RAG_ENABLE_RAGAS", "1").lower() not in {"0", "false", "no"}
 RAGAS_ASYNC = os.getenv("CODEBASE_RAG_RAGAS_ASYNC", "0").lower() in {"1", "true", "yes"}
 RAGAS_RAISE_EXCEPTIONS = os.getenv("CODEBASE_RAG_RAGAS_RAISE_EXCEPTIONS", "0").lower() in {
@@ -31,6 +35,8 @@ RAGAS_RAISE_EXCEPTIONS = os.getenv("CODEBASE_RAG_RAGAS_RAISE_EXCEPTIONS", "0").l
     "true",
     "yes",
 }
+MIN_REFERENCE_OVERLAP = float(os.getenv("CODEBASE_RAG_MIN_REFERENCE_OVERLAP", "0.2"))
+MIN_REFERENCE_TERM_MATCHES = int(os.getenv("CODEBASE_RAG_MIN_REFERENCE_TERM_MATCHES", "2"))
 EVAL_SET_PATH = Path(
     os.getenv(
         "CODEBASE_RAG_EVAL_SET",
@@ -41,6 +47,47 @@ EVAL_SET_PATH = Path(
 
 def log(message: str):
     print(f"[eval] {message}", file=sys.stderr, flush=True)
+
+
+def get_app_model_config():
+    llm_provider = os.getenv("LLM_PROVIDER", "bedrock").lower()
+    if llm_provider == "groq":
+        llm_model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+    elif llm_provider == "bedrock":
+        llm_model = os.getenv(
+            "BEDROCK_LLM_MODEL",
+            "anthropic.claude-sonnet-4-20250514-v1:0",
+        )
+    elif llm_provider == "vertex_ai":
+        llm_model = os.getenv("VERTEX_LLM_MODEL", "claude-sonnet-4@20250514")
+    else:
+        llm_model = "unknown"
+
+    embedding_provider = os.getenv("EMBEDDING_PROVIDER", "auto").lower()
+    if embedding_provider == "bedrock":
+        embedding_model = os.getenv("BEDROCK_EMBEDDING_MODEL", "cohere.embed-v4:0")
+    elif embedding_provider == "vertex_ai":
+        embedding_model = os.getenv("VERTEX_EMBEDDING_MODEL", "gemini-embedding-001")
+    elif embedding_provider == "openai":
+        embedding_model = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
+    elif embedding_provider == "local":
+        embedding_model = os.getenv("EMBEDDING_MODEL") or os.getenv(
+            "LOCAL_EMBEDDING_MODEL", "nomic-ai/CodeRankEmbed"
+        )
+    else:
+        embedding_model = os.getenv("EMBEDDING_MODEL") or "auto"
+
+    eval_model = os.getenv(
+        "EVAL_MODEL",
+        os.getenv("BEDROCK_EVAL_MODEL", "anthropic.claude-opus-4-20250514-v1:0"),
+    )
+    return {
+        "llm_provider": llm_provider,
+        "llm_model": llm_model,
+        "embedding_provider": embedding_provider,
+        "embedding_model": embedding_model,
+        "eval_model": eval_model,
+    }
 
 
 def load_eval_rows():
@@ -54,24 +101,51 @@ def post_query(row):
         "top_k": TOP_K,
         "history": row.get("turns", []),
     }
-    response = requests.post(
-        f"{API_URL}/api/query",
-        json=payload,
-        headers={"X-Session-Id": SESSION_ID},
-        timeout=QUERY_TIMEOUT_SECONDS,
-    )
-    if not response.ok:
+    case_id = row.get("id", row["question"])
+
+    for attempt in range(1, QUERY_MAX_RETRIES + 1):
+        response = requests.post(
+            f"{API_URL}/api/query",
+            json=payload,
+            headers={"X-Session-Id": SESSION_ID},
+            timeout=QUERY_TIMEOUT_SECONDS,
+        )
+        if response.ok:
+            return response.json()
+
         detail = response.text
         try:
             parsed = response.json()
             detail = parsed.get("detail") or parsed
         except Exception:
             pass
+
+        detail_text = str(detail)
+        is_retryable = response.status_code in {429, 500, 502, 503, 504} and any(
+            marker in detail_text
+            for marker in [
+                "ThrottlingException",
+                "Too many requests",
+                "timed out",
+                "timeout",
+                "ServiceUnavailable",
+            ]
+        )
+        if is_retryable and attempt < QUERY_MAX_RETRIES:
+            wait_seconds = QUERY_RETRY_BASE_SECONDS * (2 ** (attempt - 1))
+            log(
+                f"Retrying case {case_id} after transient query failure "
+                f"(attempt {attempt}/{QUERY_MAX_RETRIES}, wait={wait_seconds:.1f}s): {detail_text}"
+            )
+            time.sleep(wait_seconds)
+            continue
+
         raise RuntimeError(
-            f"Query failed for eval case {row.get('id', row['question'])!r} "
+            f"Query failed for eval case {case_id!r} "
             f"with status {response.status_code}: {detail}"
         )
-    return response.json()
+
+    raise RuntimeError(f"Query failed for eval case {case_id!r}: exhausted retries")
 
 
 def normalize_path(path: str) -> str:
@@ -113,6 +187,18 @@ STOPWORDS = {
 
 def tokenize_text(text: str):
     return re.findall(r"[a-z0-9_./+-]+", (text or "").lower())
+
+
+def normalize_keywords(keywords):
+    normalized = []
+    seen = set()
+    for keyword in keywords or []:
+        phrase = " ".join(tokenize_text(str(keyword)))
+        if not phrase or phrase in seen:
+            continue
+        seen.add(phrase)
+        normalized.append(phrase)
+    return normalized
 
 
 def compute_retrieval_metrics(expected_sources, actual_sources):
@@ -165,24 +251,52 @@ def compute_retrieval_metrics(expected_sources, actual_sources):
     }
 
 
-def keyword_match_ratio(row, answer: str):
-    keywords = [keyword.lower() for keyword in row.get("must_include_any", []) if keyword.strip()]
+def keyword_match_details(row, answer: str):
+    keywords = normalize_keywords(row.get("must_include_any", []))
     if not keywords:
         return None
-    lowered = answer.lower()
-    matched = sum(1 for keyword in keywords if keyword in lowered)
-    return matched / len(keywords)
+
+    answer_tokens = tokenize_text(answer)
+    if not answer_tokens:
+        return {
+            "coverage": 0.0,
+            "matched_count": 0,
+            "total_keywords": len(keywords),
+            "matched_keywords": [],
+            "missing_keywords": keywords,
+        }
+
+    matched_keywords = []
+    for keyword in keywords:
+        keyword_tokens = keyword.split()
+        window = len(keyword_tokens)
+        if window == 1:
+            if keyword_tokens[0] in answer_tokens:
+                matched_keywords.append(keyword)
+            continue
+
+        for index in range(0, len(answer_tokens) - window + 1):
+            if answer_tokens[index : index + window] == keyword_tokens:
+                matched_keywords.append(keyword)
+                break
+
+    matched_set = set(matched_keywords)
+    missing_keywords = [keyword for keyword in keywords if keyword not in matched_set]
+    matched_count = len(matched_set)
+    return {
+        "coverage": matched_count / len(keywords),
+        "matched_count": matched_count,
+        "total_keywords": len(keywords),
+        "matched_keywords": sorted(matched_set),
+        "missing_keywords": missing_keywords,
+    }
 
 
-def keyword_pass(row, answer: str, coverage: float | None):
-    if coverage is None:
+def keyword_pass(row, keyword_details):
+    if keyword_details is None:
         return None
     minimum = int(row.get("min_keyword_matches", 1))
-    keywords = [keyword for keyword in row.get("must_include_any", []) if str(keyword).strip()]
-    if not keywords:
-        return None
-    matched = round(coverage * len(keywords))
-    return 1 if matched >= minimum else 0
+    return 1 if keyword_details["matched_count"] >= minimum else 0
 
 
 def answer_length_metrics(answer: str):
@@ -193,7 +307,7 @@ def answer_length_metrics(answer: str):
     }
 
 
-def lexical_overlap_ratio(reference: str, candidate: str):
+def reference_support_details(reference: str, candidate: str):
     reference_terms = {
         token for token in tokenize_text(reference)
         if len(token) > 2 and token not in STOPWORDS
@@ -201,8 +315,23 @@ def lexical_overlap_ratio(reference: str, candidate: str):
     if not reference_terms:
         return None
     candidate_terms = set(tokenize_text(candidate))
-    matched = sum(1 for token in reference_terms if token in candidate_terms)
-    return matched / len(reference_terms)
+    matched_terms = sorted(token for token in reference_terms if token in candidate_terms)
+    matched_count = len(matched_terms)
+    return {
+        "ratio": matched_count / len(reference_terms),
+        "matched_count": matched_count,
+        "reference_term_count": len(reference_terms),
+        "matched_terms": matched_terms,
+    }
+
+
+def reference_support_pass(reference_details):
+    if reference_details is None:
+        return None
+    return 1 if (
+        reference_details["ratio"] >= MIN_REFERENCE_OVERLAP
+        and reference_details["matched_count"] >= MIN_REFERENCE_TERM_MATCHES
+    ) else 0
 
 
 def validate_eval_rows(rows):
@@ -236,6 +365,13 @@ def validate_eval_rows(rows):
             errors.append(f"{row_id}: expected_sources must be a non-empty list")
         if must_include_any and not isinstance(must_include_any, list):
             errors.append(f"{row_id}: must_include_any must be a list when present")
+        if isinstance(must_include_any, list):
+            normalized_keywords = normalize_keywords(must_include_any)
+            if len(normalized_keywords) != len([keyword for keyword in must_include_any if str(keyword).strip()]):
+                warnings.append(
+                    f"{row_id}: duplicate or case-variant keywords were normalized; "
+                    "resume metrics are stricter than the raw checklist wording."
+                )
         if row.get("turns"):
             conversation_cases += 1
         expected_source_counts.append(len(expected_sources) if isinstance(expected_sources, list) else 0)
@@ -279,12 +415,16 @@ def validate_eval_rows(rows):
 def summarize_custom_metrics(details):
     keyword_coverages = [item["keyword_coverage"] for item in details if item["keyword_coverage"] is not None]
     keyword_passes = [item["keyword_pass"] for item in details if item["keyword_pass"] is not None]
+    reference_support_passes = [
+        item["reference_support_pass"] for item in details if item["reference_support_pass"] is not None
+    ]
     grounded_answer_passes = [
         1
         for item in details
         if item["retrieval_hit"] == 1
         and item["has_substantive_answer"] == 1
         and (item["keyword_pass"] in {None, 1})
+        and (item["reference_support_pass"] in {None, 1})
     ]
     exact_source_recall_cases = [1 for item in details if item["source_recall"] == 1.0]
     return {
@@ -296,6 +436,7 @@ def summarize_custom_metrics(details):
         "duplicate_source_rate": round(mean(item["duplicate_source_rate"] for item in details), 4),
         "keyword_coverage": round(mean(keyword_coverages), 4) if keyword_coverages else None,
         "keyword_pass_rate": round(mean(keyword_passes), 4) if keyword_passes else None,
+        "reference_support_rate": round(mean(reference_support_passes), 4) if reference_support_passes else None,
         "ground_truth_lexical_overlap": round(
             mean(item["ground_truth_lexical_overlap"] for item in details if item["ground_truth_lexical_overlap"] is not None),
             4,
@@ -323,10 +464,23 @@ def summarize_by_category(details):
             "source_recall": round(mean(item["source_recall"] for item in items), 4),
             "mrr": round(mean(item["mrr"] for item in items), 4),
             "keyword_pass_rate": round(mean(keyword_passes), 4) if keyword_passes else None,
+            "reference_support_rate": round(
+                mean(
+                    item["reference_support_pass"]
+                    for item in items
+                    if item["reference_support_pass"] is not None
+                ),
+                4,
+            )
+            if any(item["reference_support_pass"] is not None for item in items)
+            else None,
             "grounded_answer_rate": round(
                 mean(
                     1
-                    if item["retrieval_hit"] == 1 and item["has_substantive_answer"] == 1 and item["keyword_pass"] in {None, 1}
+                    if item["retrieval_hit"] == 1
+                    and item["has_substantive_answer"] == 1
+                    and item["keyword_pass"] in {None, 1}
+                    and item["reference_support_pass"] in {None, 1}
                     else 0
                     for item in items
                 ),
@@ -346,6 +500,7 @@ def build_headline_metrics(custom_metrics, audit):
         "source_recall": custom_metrics["source_recall"],
         "grounded_answer_rate": custom_metrics["grounded_answer_rate"],
         "keyword_pass_rate": custom_metrics["keyword_pass_rate"],
+        "reference_support_rate": custom_metrics["reference_support_rate"],
     }
 
 
@@ -361,9 +516,14 @@ def build_resume_summary(custom_metrics, audit, ragas_report, ragas_error):
             f"source recall {custom_metrics['source_recall']:.1%}."
         ),
         (
-            f"Answer quality checks: grounded answer rate {custom_metrics['grounded_answer_rate']:.1%}"
+            f"Strict answer quality checks: grounded answer rate {custom_metrics['grounded_answer_rate']:.1%}"
             + (
-                f", keyword/checklist pass rate {custom_metrics['keyword_pass_rate']:.1%}."
+                f", keyword/checklist pass rate {custom_metrics['keyword_pass_rate']:.1%}"
+                + (
+                    f", reference-support pass rate {custom_metrics['reference_support_rate']:.1%}."
+                    if custom_metrics["reference_support_rate"] is not None
+                    else "."
+                )
                 if custom_metrics["keyword_pass_rate"] is not None
                 else "."
             )
@@ -424,13 +584,12 @@ def maybe_write_report(report):
 
 
 def build_bedrock_ragas_llm(run_config):
-    import boto3
     from langchain_core.outputs import Generation, LLMResult
     from ragas.llms.base import BaseRagasLLM
 
     class BedrockRagasLLM(BaseRagasLLM):
-        def __init__(self, model: str, region: str, run_config):
-            self.client = boto3.client("bedrock-runtime", region_name=region)
+        def __init__(self, model: str, run_config):
+            self.client = create_bedrock_runtime_client()
             self.model = model
             self.set_run_config(run_config)
 
@@ -445,35 +604,19 @@ def build_bedrock_ragas_llm(run_config):
 
         def _generate_once(self, prompt, n=1, temperature=1e-8, stop=None, callbacks=None):
             prompt_text = self._prompt_to_text(prompt)
-            inference_config = {
-                "temperature": 0.0,
-                "maxTokens": int(os.getenv("EVAL_MAX_OUTPUT_TOKENS", "2048")),
-            }
-            if stop:
-                inference_config["stopSequences"] = stop
-
-            response = self.client.converse(
-                modelId=self.model,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [{"text": prompt_text}],
-                    }
-                ],
-                inferenceConfig=inference_config,
+            text, _ = generate_bedrock_claude_text(
+                self.client,
+                self.model,
+                "Return only valid JSON or the exact structured output requested.",
+                prompt_text,
+                max_tokens=int(os.getenv("EVAL_MAX_OUTPUT_TOKENS", "2048")),
+                temperature=0.0,
             )
 
-            generations = []
-            output_message = (response.get("output") or {}).get("message") or {}
-            content_blocks = output_message.get("content") or []
-            text = "".join(
-                block.get("text", "") for block in content_blocks if isinstance(block, dict)
-            ).strip()
-            if text:
-                generations.append(Generation(text=text))
+            generations = [Generation(text=text)] if text else []
 
             if not generations:
-                raise RuntimeError("AWS Bedrock judge returned an empty response.")
+                raise RuntimeError("Bedrock Claude judge returned an empty response.")
 
             return LLMResult(generations=[generations])
 
@@ -496,12 +639,11 @@ def build_bedrock_ragas_llm(run_config):
                 callbacks,
             )
 
-    region = os.getenv("AWS_REGION", os.getenv("AWS_DEFAULT_REGION", "us-east-1"))
     model = os.getenv(
         "EVAL_MODEL",
-        os.getenv("BEDROCK_EVAL_MODEL", "us.anthropic.claude-haiku-4-5-20251001"),
+        os.getenv("BEDROCK_EVAL_MODEL", "anthropic.claude-opus-4-20250514-v1:0"),
     )
-    return BedrockRagasLLM(model=model, region=region, run_config=run_config)
+    return BedrockRagasLLM(model=model, run_config=run_config)
 
 
 def build_ragas_embeddings(run_config):
@@ -568,8 +710,8 @@ def run_ragas(rows, outputs):
             max_wait=int(os.getenv("EVAL_MAX_WAIT_SECONDS", "60")),
         )
         log(
-            "Using AWS Bedrock for RAGAS judge model "
-            f"({os.getenv('EVAL_MODEL', os.getenv('BEDROCK_EVAL_MODEL', 'us.anthropic.claude-haiku-4-5-20251001'))})"
+            "Using Bedrock for RAGAS judge model "
+            f"({os.getenv('EVAL_MODEL', os.getenv('BEDROCK_EVAL_MODEL', 'anthropic.claude-opus-4-20250514-v1:0'))})"
         )
         log(
             f"RAGAS runtime: async={RAGAS_ASYNC}, raise_exceptions={RAGAS_RAISE_EXCEPTIONS}, "
@@ -596,10 +738,19 @@ def run():
     log(f"Loading eval set from {EVAL_SET_PATH}")
     rows = load_eval_rows()
     audit = validate_eval_rows(rows)
+    model_config = get_app_model_config()
     if audit["errors"]:
         raise RuntimeError("Eval set validation failed: " + "; ".join(audit["errors"]))
     for warning in audit["warnings"]:
         log(f"Eval set warning: {warning}")
+    log(
+        "Eval model config: "
+        f"qna_provider={model_config['llm_provider']}, "
+        f"qna_model={model_config['llm_model']}, "
+        f"embedding_provider={model_config['embedding_provider']}, "
+        f"embedding_model={model_config['embedding_model']}, "
+        f"judge_model={model_config['eval_model']}"
+    )
     log(
         f"Starting eval with api_url={API_URL}, repo_id={REPO_ID}, "
         f"session_id={SESSION_ID}, top_k={TOP_K}, cases={len(rows)}"
@@ -619,10 +770,13 @@ def run():
 
         cited_paths = [source["file_path"] for source in result.get("sources", [])]
         metrics = compute_retrieval_metrics(row.get("expected_sources", []), cited_paths)
-        keyword_coverage = keyword_match_ratio(row, result.get("answer", ""))
-        keyword_gate = keyword_pass(row, result.get("answer", ""), keyword_coverage)
+        keyword_details = keyword_match_details(row, result.get("answer", ""))
+        keyword_coverage = keyword_details["coverage"] if keyword_details else None
+        keyword_gate = keyword_pass(row, keyword_details)
         length_metrics = answer_length_metrics(result.get("answer", ""))
-        overlap = lexical_overlap_ratio(row.get("ground_truth", ""), result.get("answer", ""))
+        reference_details = reference_support_details(row.get("ground_truth", ""), result.get("answer", ""))
+        overlap = reference_details["ratio"] if reference_details else None
+        reference_gate = reference_support_pass(reference_details)
 
         details.append(
             {
@@ -640,7 +794,15 @@ def run():
                 "duplicate_source_rate": metrics["duplicate_source_rate"],
                 "keyword_coverage": keyword_coverage,
                 "keyword_pass": keyword_gate,
+                "matched_keyword_count": keyword_details["matched_count"] if keyword_details else None,
+                "total_keywords": keyword_details["total_keywords"] if keyword_details else None,
+                "matched_keywords": keyword_details["matched_keywords"] if keyword_details else [],
+                "missing_keywords": keyword_details["missing_keywords"] if keyword_details else [],
                 "ground_truth_lexical_overlap": overlap,
+                "reference_support_pass": reference_gate,
+                "reference_term_match_count": reference_details["matched_count"] if reference_details else None,
+                "reference_term_count": reference_details["reference_term_count"] if reference_details else None,
+                "matched_reference_terms": reference_details["matched_terms"] if reference_details else [],
                 **length_metrics,
             }
         )
@@ -659,8 +821,17 @@ def run():
             "repo_id": REPO_ID,
             "session_id": SESSION_ID,
             "top_k": TOP_K,
+            "qna_provider": model_config["llm_provider"],
+            "qna_model": model_config["llm_model"],
+            "embedding_provider": model_config["embedding_provider"],
+            "embedding_model": model_config["embedding_model"],
+            "eval_model": model_config["eval_model"],
             "query_timeout_seconds": QUERY_TIMEOUT_SECONDS,
+            "query_max_retries": QUERY_MAX_RETRIES,
+            "query_retry_base_seconds": QUERY_RETRY_BASE_SECONDS,
             "eval_set": str(EVAL_SET_PATH),
+            "min_reference_overlap": MIN_REFERENCE_OVERLAP,
+            "min_reference_term_matches": MIN_REFERENCE_TERM_MATCHES,
         },
         "eval_set_audit": audit,
         "headline_metrics": headline_metrics,

@@ -130,11 +130,11 @@ Main entry points:
 ### Retrieval Pipeline
 
 - tree-sitter for code-aware chunking
-- AWS Bedrock, Vertex AI, or local embeddings for semantic retrieval depending on environment
+- Amazon Bedrock or local embeddings for semantic retrieval depending on environment
 - BM25 for lexical retrieval
 - reciprocal rank fusion to combine retrieval channels
 - a cross-encoder reranker for final source ordering
-- AWS Bedrock, Groq, or Vertex AI generation depending on environment configuration
+- Groq or Amazon Bedrock generation depending on environment configuration
 
 Core modules:
 - [`server/src/code_parser.py`](/Users/sivasankernp/Desktop/code-compass/server/src/code_parser.py)
@@ -215,9 +215,9 @@ Pure semantic search misses exact symbols and file names. Pure lexical search mi
 
 ### Local Development
 
-Local development is now designed around AWS Bedrock:
-- AWS Bedrock text generation for answer generation
-- AWS Bedrock embeddings for semantic retrieval
+Local development is now designed around Amazon Bedrock:
+- Bedrock Claude Sonnet 4 for answer generation
+- Bedrock Cohere Embed v4 for semantic retrieval
 
 This setup is useful for:
 - higher quality local experiments
@@ -227,17 +227,18 @@ Recommended local runtime:
 - `LLM_PROVIDER=bedrock`
 - `EMBEDDING_PROVIDER=bedrock`
 - `AWS_REGION=us-east-1`
-- `BEDROCK_LLM_MODEL=us.meta.llama3-3-70b-instruct-v1:0`
-- `BEDROCK_EMBEDDING_MODEL=amazon.titan-embed-text-v2:0`
+- `BEDROCK_LLM_MODEL=anthropic.claude-sonnet-4-20250514-v1:0`
+- `BEDROCK_EMBEDDING_MODEL=cohere.embed-v4:0`
+- `BEDROCK_EMBEDDING_DIM=1536`
 
 ### Evaluation
 
-The evaluation harness is designed around AWS Bedrock:
-- AWS Bedrock Claude for the RAGAS judge model
+The evaluation harness is now designed around Amazon Bedrock:
+- Bedrock Claude Opus 4 for the RAGAS judge model
 - app-configured embeddings during evaluation
 
 Recommended eval runtime:
-- `EVAL_MODEL=us.anthropic.claude-haiku-4-5-20251001`
+- `EVAL_MODEL=anthropic.claude-opus-4-20250514-v1:0`
 - `AWS_REGION=us-east-1`
 
 ### Production Deployment
@@ -305,7 +306,7 @@ The benchmark currently measures:
 - grounded answer rate
 - optional RAGAS judge metrics such as faithfulness and answer relevancy
 
-The current RAGAS judge configuration uses AWS Bedrock Claude Haiku 4.5 via `EVAL_MODEL`.
+The current RAGAS judge configuration uses Bedrock Claude Opus 4 via `EVAL_MODEL`.
 
 The project includes a measurable end-to-end evaluation workflow alongside the product itself.
 
@@ -373,9 +374,10 @@ pip install -r requirements.txt
 export LLM_PROVIDER=bedrock
 export EMBEDDING_PROVIDER=bedrock
 export AWS_REGION=us-east-1
-export BEDROCK_LLM_MODEL=us.meta.llama3-3-70b-instruct-v1:0
-export BEDROCK_EMBEDDING_MODEL=amazon.titan-embed-text-v2:0
-export EVAL_MODEL=us.anthropic.claude-haiku-4-5-20251001
+export BEDROCK_LLM_MODEL=anthropic.claude-sonnet-4-20250514-v1:0
+export BEDROCK_EMBEDDING_MODEL=cohere.embed-v4:0
+export BEDROCK_EMBEDDING_DIM=1536
+export EVAL_MODEL=anthropic.claude-opus-4-20250514-v1:0
 python server_app.py
 ```
 

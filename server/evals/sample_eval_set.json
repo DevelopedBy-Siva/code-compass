@@ -669,5 +669,58 @@
       "FastAPI"
     ],
     "min_keyword_matches": 2
+  },
+  {
+    "id": "sqlmodel-sa-column-conflict-error",
+    "category": "error-handling",
+    "question": "What happens if you pass both sa_column and other Field options like primary_key or index in SQLModel?",
+    "ground_truth": "SQLModel raises a ValueError when sa_column is combined with other field-level options like primary_key, index, or foreign_key because sa_column is meant to be a fully self-contained SQLAlchemy column definition and mixing it with SQLModel field shortcuts creates an ambiguous configuration.",
+    "expected_sources": [
+      "sqlmodel/main.py"
+    ],
+    "must_include_any": [
+      "sa_column",
+      "primary_key",
+      "raise",
+      "conflict"
+    ],
+    "min_keyword_matches": 3
+  },
+  {
+    "id": "sqlmodel-codegen-basic-model",
+    "category": "code-generation",
+    "question": "Write a SQLModel table model for a User with an integer primary key, a required name string, and an optional email string",
+    "ground_truth": "A correct answer defines a class inheriting from SQLModel with table=True, uses Field(primary_key=True) on an integer id, declares name as a required str, and declares email as Optional[str] with a default of None.",
+    "expected_sources": [
+      "sqlmodel/main.py",
+      "README.md"
+    ],
+    "must_include_any": [
+      "SQLModel",
+      "Field",
+      "table=True",
+      "primary_key",
+      "Optional"
+    ],
+    "min_keyword_matches": 3
+  },
+  {
+    "id": "sqlmodel-codegen-session-query",
+    "category": "code-generation",
+    "question": "Write a SQLModel example that creates an engine, opens a session, inserts a User row, and queries all users",
+    "ground_truth": "A correct answer uses create_engine to set up the database, SQLModel.metadata.create_all to create tables, opens a Session using a context manager, adds and commits a User instance, then uses select(User) with session.exec to retrieve all rows.",
+    "expected_sources": [
+      "README.md",
+      "sqlmodel/__init__.py",
+      "sqlmodel/orm/session.py"
+    ],
+    "must_include_any": [
+      "create_engine",
+      "Session",
+      "select",
+      "exec",
+      "commit"
+    ],
+    "min_keyword_matches": 4
   }
 ]

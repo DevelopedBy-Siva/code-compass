@@ -16,6 +16,6 @@ Behavior:
 - Clones a public GitHub repo
 - Chunks it with tree-sitter
 - Builds retrieval state with a Qdrant adapter
-- Answers questions with Groq-hosted Llama, AWS Bedrock, or Vertex AI Gemini depending on environment configuration
+- Answers questions with Groq-hosted Llama or Amazon Bedrock Claude depending on environment configuration
 - Deletes the cloned repo after indexing
 - Keeps only lightweight repo metadata in SQLite

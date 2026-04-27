@@ -6,6 +6,7 @@ from typing import Dict, List, Optional
 from openai import OpenAI
 
 from src.code_parser import CodeParser
+from src.bedrock_claude import create_bedrock_runtime_client, generate_bedrock_claude_text
 from src.database import Repository, get_db_session, init_db, resolve_database_url
 from src.embeddings import EmbeddingGenerator
 from src.hybrid_search import HybridSearchEngine
@@ -526,6 +527,14 @@ Do not leave the answer unfinished.
         }
 
     def _configure_llm(self):
+        if self.llm_provider == "bedrock":
+            self.llm_client = create_bedrock_runtime_client()
+            self.llm_model = os.getenv(
+                "BEDROCK_LLM_MODEL",
+                "anthropic.claude-sonnet-4-20250514-v1:0",
+            )
+            return
+
         if self.llm_provider == "groq":
             self.llm_client = OpenAI(
                 api_key=os.getenv("GROQ_API_KEY"),
@@ -534,48 +543,53 @@ Do not leave the answer unfinished.
             self.llm_model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
             return
 
-        if self.llm_provider == "bedrock":
-            try:
-                import boto3
-            except ImportError as exc:
-                raise RuntimeError(
-                    "AWS Bedrock LLM support requires the `boto3` package."
-                ) from exc
-
-            region = os.getenv("AWS_REGION", os.getenv("AWS_DEFAULT_REGION", "us-east-1"))
-            self.llm_client = boto3.client("bedrock-runtime", region_name=region)
-            self.llm_model = os.getenv(
-                "BEDROCK_LLM_MODEL", "us.meta.llama3-3-70b-instruct-v1:0"
-            )
-            return
-
         if self.llm_provider == "vertex_ai":
+            project = os.getenv("GOOGLE_CLOUD_PROJECT")
+            location = os.getenv("GOOGLE_CLOUD_LOCATION", "global")
+            if not project:
+                raise RuntimeError(
+                    "GOOGLE_CLOUD_PROJECT must be set when using Vertex AI LLMs."
+                )
+
+            self.llm_model = os.getenv("VERTEX_LLM_MODEL", "claude-sonnet-4@20250514")
+            if self.llm_model.startswith("claude-"):
+                try:
+                    from anthropic import AnthropicVertex
+                except ImportError as exc:
+                    raise RuntimeError(
+                        "Vertex AI Claude support requires the `anthropic[vertex]` package."
+                    ) from exc
+                self.llm_client = AnthropicVertex(project_id=project, region=location)
+                return
+
             try:
                 from google import genai
             except ImportError as exc:
                 raise RuntimeError(
-                    "Vertex AI LLM support requires the `google-genai` package. "
-                    "Install server dependencies before running local or eval queries."
+                    "Vertex AI Gemini support requires the `google-genai` package."
                 ) from exc
-
-            project = os.getenv("GOOGLE_CLOUD_PROJECT")
-            location = os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
-            if not project:
-                raise RuntimeError(
-                    "GOOGLE_CLOUD_PROJECT must be set when using Vertex AI Gemini."
-                )
 
             self.llm_client = genai.Client(
                 vertexai=True,
                 project=project,
                 location=location,
             )
-            self.llm_model = os.getenv("VERTEX_LLM_MODEL", "gemini-2.5-pro")
             return
 
         raise RuntimeError(f"Unsupported LLM provider: {self.llm_provider}")
 
     def _generate_markdown_response(self, system_prompt: str, user_prompt: str) -> tuple[str, str]:
+        if self.llm_provider == "bedrock":
+            text, stop_reason = generate_bedrock_claude_text(
+                self.llm_client,
+                self.llm_model,
+                system_prompt,
+                user_prompt,
+                max_tokens=2200,
+                temperature=0.1,
+            )
+            return self._normalize_markdown_answer(text), stop_reason
+
         if self.llm_provider == "groq":
             response = self.llm_client.chat.completions.create(
                 model=self.llm_model,
@@ -590,29 +604,26 @@ Do not leave the answer unfinished.
             finish_reason = getattr(response.choices[0], "finish_reason", "") or ""
             return self._normalize_markdown_answer(content), str(finish_reason)
 
-        if self.llm_provider == "bedrock":
-            response = self.llm_client.converse(
-                modelId=self.llm_model,
-                system=[{"text": system_prompt.strip()}],
+        if self.llm_provider == "vertex_ai" and self.llm_model.startswith("claude-"):
+            message = self.llm_client.messages.create(
+                model=self.llm_model,
+                system=system_prompt.strip(),
+                max_tokens=2200,
+                temperature=0.1,
                 messages=[
                     {
                         "role": "user",
-                        "content": [{"text": user_prompt.strip()}],
+                        "content": user_prompt.strip(),
                     }
                 ],
-                inferenceConfig={
-                    "temperature": 0.1,
-                    "maxTokens": 2200,
-                },
             )
-            output_message = (response.get("output") or {}).get("message") or {}
-            content_blocks = output_message.get("content") or []
+            content_blocks = getattr(message, "content", None) or []
             text = "".join(
-                block.get("text", "") for block in content_blocks if isinstance(block, dict)
+                getattr(block, "text", "") for block in content_blocks if getattr(block, "text", "")
             )
             if not text.strip():
-                raise RuntimeError("AWS Bedrock returned an empty response.")
-            stop_reason = response.get("stopReason", "") or ""
+                raise RuntimeError("Vertex AI Claude returned an empty response.")
+            stop_reason = getattr(message, "stop_reason", "") or ""
             return self._normalize_markdown_answer(text), str(stop_reason)
 
         response = self.llm_client.models.generate_content(
