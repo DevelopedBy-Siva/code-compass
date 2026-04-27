@@ -45,13 +45,23 @@ IGNORED_FILENAMES = {
 }
 
 IGNORED_DIRS = {
+    ".agents",
+    ".cache",
     ".git",
+    ".mypy_cache",
     ".next",
+    ".opencode",
+    ".parcel-cache",
+    ".pytest_cache",
+    ".ruff_cache",
     ".turbo",
+    ".vite",
     "dist",
     "build",
     "coverage",
+    "logs",
     "node_modules",
+    "tmp",
     "vendor",
     ".venv",
     "venv",

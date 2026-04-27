@@ -125,14 +125,24 @@ def post_query(row):
             marker in detail_text
             for marker in [
                 "ThrottlingException",
+                "throttled",
                 "Too many requests",
                 "timed out",
                 "timeout",
                 "ServiceUnavailable",
+                "temporarily unavailable",
             ]
         )
         if is_retryable and attempt < QUERY_MAX_RETRIES:
-            wait_seconds = QUERY_RETRY_BASE_SECONDS * (2 ** (attempt - 1))
+            retry_after = response.headers.get("Retry-After")
+            try:
+                wait_seconds = (
+                    float(retry_after)
+                    if retry_after
+                    else QUERY_RETRY_BASE_SECONDS * (2 ** (attempt - 1))
+                )
+            except ValueError:
+                wait_seconds = QUERY_RETRY_BASE_SECONDS * (2 ** (attempt - 1))
             log(
                 f"Retrying case {case_id} after transient query failure "
                 f"(attempt {attempt}/{QUERY_MAX_RETRIES}, wait={wait_seconds:.1f}s): {detail_text}"
@@ -617,7 +627,7 @@ def build_resume_summary(custom_metrics, audit, ragas_report, ragas_error):
     return " ".join(lines)
 
 
-def benchmark_readiness(audit, ragas_error):
+def benchmark_readiness(audit, ragas_error, metric_guidance=None):
     reasons = []
     if audit["case_count"] < 25:
         reasons.append("small_sample")
@@ -629,10 +639,15 @@ def benchmark_readiness(audit, ragas_error):
         reasons.append("eval_set_warnings")
     if ragas_error not in {None, "disabled"}:
         reasons.append("ragas_instability")
+    if metric_guidance and metric_guidance.get("primary_gate") != "pass":
+        reasons.append("primary_gate_failed")
 
     if reasons:
+        status = "single_repo_benchmark_needs_work"
+        if audit.get("benchmark_scope", {}).get("type") != "single_repository":
+            status = "internal_or_demo_benchmark"
         return {
-            "status": "internal_or_demo_benchmark",
+            "status": status,
             "reasons": reasons,
         }
     if audit.get("benchmark_scope", {}).get("type") == "single_repository":
@@ -774,7 +789,7 @@ def run_ragas(rows, outputs):
     try:
         timeout_seconds = int(os.getenv("EVAL_TIMEOUT_SECONDS", "180"))
         thread_timeout_seconds = float(os.getenv("EVAL_THREAD_TIMEOUT_SECONDS", str(max(timeout_seconds, 240))))
-        max_workers = int(os.getenv("EVAL_MAX_WORKERS", "4"))
+        max_workers = int(os.getenv("EVAL_MAX_WORKERS", "2"))
         run_config = RunConfig(
             timeout=timeout_seconds,
             thread_timeout=thread_timeout_seconds,
@@ -887,7 +902,7 @@ def run():
     headline_metrics = build_headline_metrics(custom_metrics, audit)
     metric_guidance = build_metric_guidance(custom_metrics, ragas_report)
     resume_summary = build_resume_summary(custom_metrics, audit, ragas_report, ragas_error)
-    readiness = benchmark_readiness(audit, ragas_error)
+    readiness = benchmark_readiness(audit, ragas_error, metric_guidance)
 
     report = {
         "config": {

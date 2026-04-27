@@ -6,6 +6,7 @@
     "ground_truth": "Documenso is an open-source document signing platform and DocuSign alternative. It lets users create, send, and sign documents electronically while emphasizing self-hosting, trust, and the ability to inspect how the signing system works under the hood.",
     "expected_sources": [
       "README.md",
+      "MANIFEST.md",
       "ARCHITECTURE.md"
     ],
     "must_include_any": [

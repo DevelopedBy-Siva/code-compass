@@ -361,7 +361,14 @@ class CodebaseRAGSystem:
                 "setup",
                 "tests",
             }
-            search_depth = top_k * 4 if question_intent in deep_search_intents else top_k * 2
+            deep_multiplier = int(os.getenv("RAG_DEEP_SEARCH_MULTIPLIER", "8"))
+            shallow_multiplier = int(os.getenv("RAG_SEARCH_MULTIPLIER", "4"))
+            search_depth = (
+                top_k * deep_multiplier
+                if question_intent in deep_search_intents
+                else top_k * shallow_multiplier
+            )
+            search_depth = max(top_k, min(search_depth, 120))
             retrieval_query = self._build_retrieval_query(question, normalized_history)
             query_embedding = self.embedder.embed_text(retrieval_query)
             semantic_hits = []
@@ -377,6 +384,13 @@ class CodebaseRAGSystem:
             )
             semantic_hits = self.hybrid_search.normalize_semantic_results(semantic_hits)
             fused = self.hybrid_search.reciprocal_rank_fusion(lexical_hits, semantic_hits, top_k=search_depth)
+            path_hits = self._path_intent_search(
+                self.repo_chunks[repo_id],
+                question,
+                retrieval_query,
+                top_k=search_depth,
+            )
+            fused = self._merge_ranked_candidates(fused, path_hits, top_k=search_depth)
             rerank_query = retrieval_query if question_intent in deep_search_intents else question
             reranked = self.hybrid_search.rerank(rerank_query, fused, top_k=search_depth)
             reranked = self._prioritize_results(question, retrieval_query, reranked, top_k=top_k)
@@ -846,6 +860,107 @@ Do not leave the answer unfinished.
             parts.append(f"Previous answer: {recent_assistant[0][:300]}")
         return "\n".join(parts)
 
+    def _merge_ranked_candidates(
+        self,
+        ranked_results: List[dict],
+        path_results: List[dict],
+        top_k: int,
+    ) -> List[dict]:
+        merged = {}
+
+        for rank, item in enumerate(ranked_results, start=1):
+            enriched = dict(item)
+            enriched.setdefault("rrf_score", 0.0)
+            enriched["candidate_rank"] = rank
+            merged[enriched["id"]] = enriched
+
+        for rank, item in enumerate(path_results, start=1):
+            existing = merged.get(item["id"])
+            path_bonus = 1.0 / (20 + rank)
+            if existing is None:
+                enriched = dict(item)
+                enriched["rrf_score"] = float(enriched.get("rrf_score", 0.0)) + path_bonus
+                enriched["path_rank"] = rank
+                merged[enriched["id"]] = enriched
+                continue
+
+            existing.update({key: value for key, value in item.items() if key not in existing})
+            existing["rrf_score"] = float(existing.get("rrf_score", 0.0)) + path_bonus
+            existing["path_rank"] = rank
+
+        return sorted(
+            merged.values(),
+            key=lambda item: (
+                float(item.get("rrf_score", 0.0)),
+                float(item.get("path_score", 0.0)),
+                float(item.get("semantic_score", 0.0)),
+            ),
+            reverse=True,
+        )[:top_k]
+
+    def _path_intent_search(
+        self,
+        chunks: List[dict],
+        question: str,
+        retrieval_query: str,
+        top_k: int,
+    ) -> List[dict]:
+        if not chunks:
+            return []
+
+        combined_query = f"{question}\n{retrieval_query}"
+        path_hints = self._domain_path_hints(combined_query)
+        code_terms = self._query_code_terms(combined_query)
+        if not path_hints and not code_terms:
+            return []
+
+        scored = []
+        path_fragments = self._query_path_fragments(combined_query)
+        for item in chunks:
+            score = 0
+            file_path = (item.get("file_path") or "").lower()
+            text = " ".join(
+                [
+                    file_path,
+                    str(item.get("symbol_name") or "").lower(),
+                    str(item.get("signature") or "").lower(),
+                    str(item.get("content") or "")[:500].lower(),
+                ]
+            )
+
+            for fragment in path_fragments:
+                if file_path == fragment or file_path.endswith(f"/{fragment}") or fragment in file_path:
+                    score += 12
+
+            for hint in path_hints:
+                normalized_hint = hint.rstrip("/").lower()
+                if file_path == normalized_hint or file_path.startswith(normalized_hint + "/"):
+                    score += 10
+                elif normalized_hint in file_path:
+                    score += 6
+
+            if code_terms:
+                score += min(sum(1 for term in code_terms if term in text), 8)
+
+            if score <= 0:
+                continue
+
+            score += max(self._canonical_path_priority(item, combined_query), 0)
+
+            enriched = dict(item)
+            enriched["path_score"] = float(score)
+            scored.append(enriched)
+
+        scored.sort(
+            key=lambda item: (
+                float(item.get("path_score", 0.0)),
+                float(item.get("bm25_score", 0.0)),
+                float(item.get("semantic_score", 0.0)),
+            ),
+            reverse=True,
+        )
+        return scored[:top_k]
+
     def _prioritize_results(
         self,
         question: str,
@@ -858,16 +973,20 @@ Do not leave the answer unfinished.
             token in combined_query
             for token in {"code", "snippet", "implementation", "function", "class", "import"}
         )
-        wants_docs = self._is_documentation_query(combined_query)
+        question_intent = self._question_intent(question)
+        wants_docs = self._is_documentation_query(combined_query) and question_intent in {
+            "docs",
+            "overview",
+        }
         wants_repo_overview = self._is_repo_overview_question(question) or self._is_repo_overview_question(
             retrieval_query
         )
-        question_intent = self._question_intent(question)
 
         def sort_key(item: dict):
             is_doc = self._is_doc_source(item)
             return (
-                self._canonical_path_priority(item, question),
+                self._canonical_path_priority(item, combined_query),
+                float(item.get("path_score", 0.0)),
                 self._doc_priority(item),
                 1 if wants_repo_overview and is_doc else 0,
                 1 if (wants_docs and is_doc) or (not wants_docs and not is_doc) else 0,
@@ -953,19 +1072,81 @@ Do not leave the answer unfinished.
         normalized = " ".join((question or "").lower().split())
         if not normalized:
             return "general"
+        def has_any(terms: set[str]) -> bool:
+            return any(
+                re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", normalized)
+                for term in terms
+            )
+
         if CodebaseRAGSystem._is_repo_overview_question(normalized):
             return "overview"
-        if any(token in normalized for token in {"test", "tests", "pytest", "spec"}):
+        if has_any({"test", "tests", "pytest", "spec"}):
             return "tests"
-        if any(token in normalized for token in {"error", "invalid", "conflict", "raises", "guard against"}):
+        if has_any({"error", "invalid", "conflict", "raises", "guard against"}):
             return "error_handling"
-        if any(token in normalized for token in {"how are", "how does", "flow", "across files", "code path"}):
-            return "cross_file"
-        if any(token in normalized for token in {"export", "expose", "import", "public api"}):
+        if has_any(
+            {
+                "api",
+                "api v1",
+                "api v2",
+                "endpoint",
+                "frontend",
+                "backend",
+                "openapi",
+                "public api",
+                "route",
+                "router",
+                "trpc",
+            }
+        ):
             return "api"
-        if any(token in normalized for token in {"create", "setup", "install", "configuration", "metadata", "table"}):
+        if has_any(
+            {
+                "build",
+                "configure",
+                "configured",
+                "configuration",
+                "create",
+                "database",
+                "env",
+                "environment",
+                "install",
+                "local development",
+                "metadata",
+                "orchestration",
+                "self-host",
+                "self hosting",
+                "setup",
+                "table",
+                "workspace",
+            }
+        ):
             return "setup"
-        if any(token in normalized for token in {"function", "method", "class", "implementation", "does ", "what is special"}):
+        if has_any({"flow", "across", "across files", "connect", "code path"}):
+            return "cross_file"
+        if has_any(
+            {
+                "behavior",
+                "class",
+                "function",
+                "implementation",
+                "implemented",
+                "job",
+                "jobs",
+                "lifecycle",
+                "lives",
+                "method",
+                "represented",
+                "signing",
+                "webhook",
+                "webhooks",
+                "what is special",
+                "where does",
+                "where is",
+                "where should",
+                "where would",
+            }
+        ):
             return "implementation"
         if CodebaseRAGSystem._is_documentation_query(normalized):
             return "docs"
@@ -997,6 +1178,7 @@ Do not leave the answer unfinished.
             hints.extend(["create", "setup", "configure", "initialize", "schema", "README.md", "docs"])
         if "__init__" in lowered or "exports" in lowered:
             hints.extend(["__init__.py", "package exports", "public api"])
+        hints.extend(self._domain_path_hints(normalized))
 
         for term in sorted(code_terms):
             parts = [part for part in re.split(r"[._/-]+", term) if len(part) > 2]
@@ -1049,6 +1231,200 @@ Do not leave the answer unfinished.
             return 1
         return 0
 
+    @staticmethod
+    def _domain_path_hints(query: str) -> List[str]:
+        normalized = " ".join((query or "").lower().split())
+        hints = []
+
+        def has_any(terms: set[str]) -> bool:
+            matched = False
+            for term in terms:
+                if term.startswith("/"):
+                    matched = matched or term in normalized
+                    continue
+                matched = matched or bool(
+                    re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", normalized)
+                )
+            return matched
+
+        rules = [
+            (
+                {"email", "emails", "mailer", "notification", "template"},
+                [
+                    "packages/email",
+                    "packages/lib/server-only/email",
+                    "packages/lib/jobs/definitions/emails",
+                ],
+            ),
+            (
+                {"signing", "certificate", "gcloud", "hsm", "p12", "pdf signing"},
+                [
+                    "packages/signing",
+                    "packages/signing/transports",
+                    "packages/signing/helpers",
+                    "packages/lib/jobs/definitions/internal/seal-document",
+                ],
+            ),
+            (
+                {"job", "jobs", "background", "inngest", "bullmq", "queue"},
+                [
+                    "packages/lib/jobs",
+                    "packages/lib/jobs/client",
+                    "packages/lib/jobs/definitions",
+                    "apps/remix/server/router.ts",
+                ],
+            ),
+            (
+                {"webhook", "webhooks", "ssrf"},
+                [
+                    "packages/lib/server-only/webhooks",
+                    "packages/lib/jobs/definitions/internal/execute-webhook",
+                ],
+            ),
+            (
+                {"recipient", "recipients"},
+                [
+                    "packages/lib/server-only/recipient",
+                    "packages/trpc/server/recipient-router",
+                ],
+            ),
+            (
+                {"field", "fields"},
+                [
+                    "packages/lib/server-only/field",
+                    "packages/trpc/server/field-router",
+                    "packages/lib/universal/field-renderer",
+                ],
+            ),
+            (
+                {"template", "templates"},
+                [
+                    "packages/lib/server-only/template",
+                    "packages/trpc/server/template-router",
+                ],
+            ),
+            (
+                {"envelope", "envelopes"},
+                [
+                    "packages/lib/server-only/envelope",
+                    "packages/lib/server-only/envelope-item",
+                    "packages/trpc/server/envelope-router",
+                ],
+            ),
+            (
+                {"document", "documents"},
+                [
+                    "packages/lib/server-only/document",
+                    "packages/lib/server-only/document-data",
+                    "packages/trpc/server/document-router",
+                ],
+            ),
+            (
+                {"pdf", "storage", "upload", "s3"},
+                [
+                    "packages/lib/server-only/pdf",
+                    "packages/lib/server-only/document-data",
+                    "packages/lib/universal/upload",
+                    "apps/remix/server/api/files",
+                ],
+            ),
+            (
+                {"api v1", "/api/v1", "ts-rest", "ts rest"},
+                [
+                    "packages/api",
+                    "packages/api/v1",
+                    "packages/api/hono.ts",
+                ],
+            ),
+            (
+                {"api v2", "/api/v2", "openapi", "trpc-to-openapi"},
+                [
+                    "packages/trpc/server",
+                    "packages/trpc/server/open-api.ts",
+                    "apps/remix/server/router.ts",
+                    "apps/remix/server/trpc",
+                ],
+            ),
+            (
+                {"trpc", "frontend", "backend", "/api/trpc", "internal api"},
+                [
+                    "packages/trpc",
+                    "packages/trpc/react",
+                    "packages/trpc/client",
+                    "packages/trpc/server/context.ts",
+                    "apps/remix/server/trpc",
+                    "apps/remix/server/router.ts",
+                ],
+            ),
+            (
+                {"auth", "authentication", "session", "api token", "authorization", "bearer"},
+                [
+                    "packages/auth",
+                    "packages/lib/server-only/auth",
+                    "packages/lib/server-only/public-api",
+                    "packages/trpc/server/context.ts",
+                    "packages/trpc/server/trpc.ts",
+                    "packages/api/v1/middleware/authenticated.ts",
+                    "apps/remix/server/context.ts",
+                ],
+            ),
+            (
+                {"database", "postgres", "postgresql", "prisma", "kysely", "migration"},
+                [
+                    "packages/prisma",
+                    "packages/prisma/schema.prisma",
+                    "packages/prisma/migrations",
+                    ".env.example",
+                ],
+            ),
+            (
+                {"remix", "hono", "react router", "route", "routes", "user interface"},
+                [
+                    "apps/remix/server",
+                    "apps/remix/app/routes",
+                    "apps/remix/app/root.tsx",
+                    "apps/remix/app/routes.ts",
+                ],
+            ),
+            (
+                {"test", "tests", "e2e", "playwright", "spec", "vitest"},
+                [
+                    "packages/app-tests",
+                    "packages/lib/vitest.config.ts",
+                    "packages/lib/package.json",
+                ],
+            ),
+            (
+                {
+                    "config",
+                    "configuration",
+                    "env",
+                    "environment",
+                    "local development",
+                    "self-host",
+                    "self hosting",
+                    "workspace",
+                    "workspaces",
+                    "turborepo",
+                    "turbo",
+                },
+                [
+                    ".env.example",
+                    "README.md",
+                    "package.json",
+                    "turbo.json",
+                    "apps/docs/content/docs/developers/local-development",
+                    "apps/docs/content/docs/self-hosting/configuration",
+                ],
+            ),
+        ]
+
+        for terms, paths in rules:
+            if has_any(terms):
+                hints.extend(paths)
+
+        return list(dict.fromkeys(hints))
+
     def _canonical_path_priority(self, item: dict, question: str) -> int:
         file_path = (item.get("file_path") or "").lower()
         source_text = " ".join(
@@ -1065,11 +1441,19 @@ Do not leave the answer unfinished.
         intent = self._question_intent(question)
         code_terms = self._query_code_terms(question)
         path_fragments = self._query_path_fragments(question)
+        path_hints = self._domain_path_hints(question)
         score = 0
 
         for fragment in path_fragments:
             if file_path == fragment or file_path.endswith(f"/{fragment}") or fragment in file_path:
                 score += 8
+
+        for path_hint in path_hints:
+            normalized_hint = path_hint.rstrip("/").lower()
+            if file_path == normalized_hint or file_path.startswith(normalized_hint + "/"):
+                score += 8
+            elif normalized_hint in file_path:
+                score += 4
 
         matched_terms = {term for term in code_terms if term in source_text}
         score += min(len(matched_terms), 6)
@@ -1136,7 +1520,9 @@ Do not leave the answer unfinished.
             "error_handling",
             "tests",
         }:
-            score -= 1
+            score -= 3
+        if file_path.startswith(".agents/") or file_path.startswith(".opencode/"):
+            score -= 8
 
         return score
 

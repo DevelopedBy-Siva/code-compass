@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, HttpUrl
 from dotenv import load_dotenv
 
+from src.bedrock_claude import BedrockTransientError, is_bedrock_retryable_error
 from src.rag_system import CodebaseRAGSystem
 
 load_dotenv(Path(__file__).with_name(".env"))
@@ -122,7 +123,19 @@ async def query_repository(request: QueryRequest, session_id: str = Depends(requ
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    except BedrockTransientError as exc:
+        raise HTTPException(
+            status_code=429,
+            detail=str(exc),
+            headers={"Retry-After": os.getenv("BEDROCK_HTTP_RETRY_AFTER_SECONDS", "10")},
+        )
     except Exception as exc:
+        if is_bedrock_retryable_error(exc):
+            raise HTTPException(
+                status_code=429,
+                detail=f"Bedrock throttled or was temporarily unavailable: {exc}",
+                headers={"Retry-After": os.getenv("BEDROCK_HTTP_RETRY_AFTER_SECONDS", "10")},
+            )
         raise HTTPException(status_code=500, detail=str(exc))
 
 
