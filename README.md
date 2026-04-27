@@ -312,41 +312,42 @@ The project includes a measurable end-to-end evaluation workflow alongside the p
 
 ### Benchmark Snapshot
 
-Current sample benchmark:
-- 40 evaluation cases
-- 9 categories
+Current sample benchmark target:
+- Documenso (`https://github.com/documenso/documenso.git`)
+- 43 evaluation cases
+- 10 categories
 - 4 multi-turn conversation cases
-- SQLModel-focused sample set, useful for internal iteration but not a broad public benchmark
+- full-application coverage across architecture, docs, setup, API layers, document flows, signing, email, jobs, tests, and follow-up questions
 
 | Metric | Result |
 | --- | ---: |
-| Retrieval hit rate | 90.0% |
-| Top-1 hit rate | 80.0% |
-| Mean reciprocal rank | 0.846 |
-| Source recall | 61.5% |
-| Grounded answer rate | 57.5% |
-| Keyword/checklist pass rate | 80.0% |
-| Reference-support pass rate | 87.5% |
-| Faithfulness (RAGAS, supporting) | 0.716 |
-| Answer relevancy (RAGAS, supporting) | 0.649 |
-| Context precision (RAGAS, supporting) | 0.503 |
+| Retrieval hit rate | Pending rerun |
+| Top-1 hit rate | Pending rerun |
+| Mean reciprocal rank | Pending rerun |
+| Source recall | Pending rerun |
+| Grounded answer rate | Pending rerun |
+| Keyword/checklist pass rate | Pending rerun |
+| Reference-support pass rate | Pending rerun |
+| Faithfulness (RAGAS, supporting) | Pending rerun |
+| Answer relevancy (RAGAS, supporting) | Pending rerun |
+| Context precision (RAGAS, supporting) | Pending rerun |
 
 What these numbers mean:
-- the system retrieves at least one relevant source for most benchmark cases
-- the first-ranked source is relevant in most cases, meeting the current internal 80% top-1 target
-- the benchmark includes architecture, API, setup, docs, tests, cross-file, and conversation-style questions
+- the system should retrieve at least one relevant source for most benchmark cases
+- the first-ranked source is expected to be relevant in most cases, with an internal 80% top-1 target
+- the benchmark includes architecture, API, setup, docs, tests, cross-file workflows, code-generation checklists, and conversation-style questions
 - RAGAS is treated as a secondary judge signal; deterministic retrieval and grounded checklist metrics are the primary gates
 
 Benchmark strengths:
-- strong retrieval on architecture and setup questions
-- grounded answers with source-linked citations
-- measurable end-to-end performance instead of anecdotal examples
+- full-stack application benchmark rather than a library-only benchmark
+- product-domain questions around documents, recipients, fields, signing, emails, jobs, and webhooks
+- measurable end-to-end performance instead of anecdotal examples once the new run is complete
 
 Benchmark-exposed weaknesses:
 - the sample set is focused on one target project, so it should be broadened before being presented as general benchmark evidence
-- duplicate source retrieval and noisy context selection can lower RAGAS context precision
-- some cross-file, specific-function, and test-heavy questions remain harder than single-file API questions
-- canonical implementation files are not always ranked first on the hardest prompts
+- Documenso is a large TypeScript monorepo, so context precision and directory-level source selection matter more than in the old library-focused eval
+- some cross-file, specific-function, and test-heavy questions may remain harder than single-file API questions
+- canonical implementation files may not always rank first on the hardest prompts
 
 ## Project Strengths
 

@@ -220,9 +220,14 @@ def compute_retrieval_metrics(expected_sources, actual_sources):
 
     def matches_expected(actual_path: str) -> bool:
         for expected_path in expected:
+            expected_is_directory = (
+                expected_path.endswith("/")
+                or "." not in expected_path.rsplit("/", 1)[-1]
+            )
+            normalized_expected = expected_path.rstrip("/")
             if actual_path == expected_path:
                 return True
-            if "/" not in expected_path and actual_path.startswith(expected_path.rstrip("/") + "/"):
+            if expected_is_directory and actual_path.startswith(normalized_expected + "/"):
                 return True
         return False
 
@@ -231,9 +236,14 @@ def compute_retrieval_metrics(expected_sources, actual_sources):
     if expected:
         matched_expected = set()
         for expected_path in expected:
+            expected_is_directory = (
+                expected_path.endswith("/")
+                or "." not in expected_path.rsplit("/", 1)[-1]
+            )
+            normalized_expected = expected_path.rstrip("/")
             for actual_path in actual:
                 if actual_path == expected_path or (
-                    "/" not in expected_path and actual_path.startswith(expected_path.rstrip("/") + "/")
+                    expected_is_directory and actual_path.startswith(normalized_expected + "/")
                 ):
                     matched_expected.add(expected_path)
                     break
@@ -355,6 +365,11 @@ def validate_eval_rows(rows):
     expected_source_counts = []
     keyword_counts = []
     conversation_cases = 0
+    benchmark_scope = {
+        "type": "mixed_or_unknown",
+        "dominant_prefix": None,
+        "dominant_prefix_fraction": 0.0,
+    }
 
     for index, row in enumerate(rows, start=1):
         row_id = row.get("id") or f"row-{index}"
@@ -407,10 +422,13 @@ def validate_eval_rows(rows):
 
     if id_prefix_counts:
         dominant_prefix, dominant_count = id_prefix_counts.most_common(1)[0]
-        if dominant_count / len(rows) >= 0.8:
-            warnings.append(
-                f"Most cases share the same id prefix ({dominant_prefix}), which suggests a benchmark focused on one target project."
-            )
+        dominant_prefix_fraction = dominant_count / len(rows)
+        if dominant_prefix_fraction >= 0.8:
+            benchmark_scope = {
+                "type": "single_repository",
+                "dominant_prefix": dominant_prefix,
+                "dominant_prefix_fraction": round(dominant_prefix_fraction, 4),
+            }
 
     return {
         "case_count": len(rows),
@@ -418,6 +436,7 @@ def validate_eval_rows(rows):
         "conversation_case_count": conversation_cases,
         "average_expected_sources": round(mean(expected_source_counts), 2) if expected_source_counts else 0.0,
         "average_keywords_per_case": round(mean(keyword_counts), 2) if keyword_counts else 0.0,
+        "benchmark_scope": benchmark_scope,
         "errors": errors,
         "warnings": warnings,
         "is_valid": not errors,
@@ -582,6 +601,13 @@ def build_resume_summary(custom_metrics, audit, ragas_report, ragas_error):
     else:
         lines.append("LLM-judge metrics were skipped or unstable, so headline metrics rely on deterministic checks.")
 
+    scope = audit.get("benchmark_scope", {})
+    if scope.get("type") == "single_repository":
+        lines.append(
+            "Benchmark scope: single-repository benchmark "
+            f"({scope.get('dominant_prefix')}); use it to judge this target repo, not cross-repo generalization."
+        )
+
     if audit["warnings"]:
         lines.append(
             "Benchmark caveat: "
@@ -600,7 +626,7 @@ def benchmark_readiness(audit, ragas_error):
     if audit["conversation_case_count"] < 2:
         reasons.append("limited_multi_turn_coverage")
     if audit["warnings"]:
-        reasons.append("dataset_scope_warnings")
+        reasons.append("eval_set_warnings")
     if ragas_error not in {None, "disabled"}:
         reasons.append("ragas_instability")
 
@@ -608,6 +634,11 @@ def benchmark_readiness(audit, ragas_error):
         return {
             "status": "internal_or_demo_benchmark",
             "reasons": reasons,
+        }
+    if audit.get("benchmark_scope", {}).get("type") == "single_repository":
+        return {
+            "status": "single_repo_benchmark_ready",
+            "reasons": [],
         }
     return {
         "status": "presentation_ready",

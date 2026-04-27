@@ -11,12 +11,17 @@ SUPPORTED_EXTENSIONS = {
     ".py",
     ".js",
     ".jsx",
+    ".mjs",
+    ".cjs",
     ".ts",
     ".tsx",
+    ".mts",
+    ".cts",
     ".java",
     ".go",
     ".rs",
     ".md",
+    ".mdx",
     ".json",
     ".yml",
     ".yaml",
@@ -24,6 +29,12 @@ SUPPORTED_EXTENSIONS = {
     ".sh",
     ".css",
     ".html",
+    ".prisma",
+}
+
+SUPPORTED_FILENAMES = {
+    ".env.example",
+    "Dockerfile",
 }
 
 IGNORED_FILENAMES = {
@@ -157,7 +168,10 @@ class RepoFetcher:
                 continue
             if file_path.name in IGNORED_FILENAMES:
                 continue
-            if file_path.suffix.lower() not in SUPPORTED_EXTENSIONS:
+            if (
+                file_path.suffix.lower() not in SUPPORTED_EXTENSIONS
+                and file_path.name not in SUPPORTED_FILENAMES
+            ):
                 continue
             if file_path.stat().st_size > MAX_FILE_SIZE_BYTES:
                 continue

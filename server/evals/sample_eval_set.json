@@ -1,729 +1,888 @@
 [
   {
-    "id": "sqlmodel-purpose",
+    "id": "documenso-purpose",
     "category": "architecture",
-    "question": "What is SQLModel and how is it positioned relative to Pydantic and SQLAlchemy?",
-    "ground_truth": "SQLModel is a thin layer designed to combine Pydantic-style data modeling with SQLAlchemy ORM and SQL expression features. The project presents itself as a library for SQL databases in Python that emphasizes simplicity, compatibility, and robustness while being built on top of Pydantic and SQLAlchemy.",
+    "question": "What is Documenso and what product problem is it trying to solve?",
+    "ground_truth": "Documenso is an open-source document signing platform and DocuSign alternative. It lets users create, send, and sign documents electronically while emphasizing self-hosting, trust, and the ability to inspect how the signing system works under the hood.",
     "expected_sources": [
       "README.md",
-      "sqlmodel/__init__.py",
-      "sqlmodel/main.py"
+      "ARCHITECTURE.md"
     ],
     "must_include_any": [
-      "Pydantic",
-      "SQLAlchemy",
-      "thin layer"
+      "document signing",
+      "self-host",
+      "DocuSign",
+      "open trust"
     ],
     "min_keyword_matches": 2
   },
   {
-    "id": "sqlmodel-core-model-class",
+    "id": "documenso-monorepo-shape",
     "category": "architecture",
-    "question": "Where is the core SQLModel base class defined and what is its role?",
-    "ground_truth": "The SQLModel base class is defined in sqlmodel/main.py. It acts as the main model base that bridges typed field definitions, Pydantic-compatible validation behavior, and SQLAlchemy table or ORM metadata.",
+    "question": "How is the Documenso monorepo organized at a high level?",
+    "ground_truth": "The repo is organized as a Turborepo/npm-workspaces monorepo. Applications live under apps, including the main Remix/React Router application, documentation site, and openpage-api public analytics API, while shared domain and infrastructure packages live under packages, including lib, trpc, api, prisma, ui, email, auth, and signing.",
     "expected_sources": [
-      "sqlmodel/main.py"
+      "ARCHITECTURE.md",
+      "package.json",
+      "turbo.json",
+      "apps",
+      "packages"
     ],
     "must_include_any": [
-      "SQLModel",
-      "base class",
-      "Pydantic",
-      "SQLAlchemy"
-    ],
-    "min_keyword_matches": 2
-  },
-  {
-    "id": "sqlmodel-field-helper",
-    "category": "architecture",
-    "question": "How does SQLModel expose field declarations for model attributes?",
-    "ground_truth": "SQLModel exposes a Field helper in sqlmodel/main.py and re-exports it at the package level. Field collects model metadata such as defaults, primary key flags, indexes, foreign keys, nullability, and other column-related settings used when building SQL-backed models.",
-    "expected_sources": [
-      "sqlmodel/main.py",
-      "sqlmodel/__init__.py"
-    ],
-    "must_include_any": [
-      "Field",
-      "primary key",
-      "foreign key",
-      "re-export"
-    ],
-    "min_keyword_matches": 2
-  },
-  {
-    "id": "sqlmodel-relationship-helper",
-    "category": "architecture",
-    "question": "How are relationships modeled in SQLModel?",
-    "ground_truth": "Relationships are declared through the Relationship helper and associated metadata in sqlmodel/main.py. SQLModel captures relationship configuration separately from normal field definitions so relationship behavior can be translated into SQLAlchemy ORM relationship setup.",
-    "expected_sources": [
-      "sqlmodel/main.py",
-      "sqlmodel/__init__.py"
-    ],
-    "must_include_any": [
-      "Relationship",
-      "SQLAlchemy",
-      "metadata"
-    ],
-    "min_keyword_matches": 2
-  },
-  {
-    "id": "sqlmodel-field-function",
-    "category": "specific-function",
-    "question": "What does the Field() function do in SQLModel?",
-    "ground_truth": "Field defines metadata for a model attribute, including validation defaults and SQL column configuration such as primary_key, foreign_key, index, nullable, sa_type, or sa_column options. SQLModel uses that metadata when constructing models that can also map to tables.",
-    "expected_sources": [
-      "sqlmodel/main.py"
-    ],
-    "must_include_any": [
-      "Field",
-      "primary_key",
-      "nullable",
-      "column"
-    ],
-    "min_keyword_matches": 2
-  },
-  {
-    "id": "sqlmodel-relationship-function",
-    "category": "specific-function",
-    "question": "What does Relationship() do in SQLModel?",
-    "ground_truth": "Relationship captures relationship-specific configuration for ORM links between models, such as back_populates and SQLAlchemy relationship arguments. It provides structured metadata that SQLModel can later translate into SQLAlchemy relationship objects.",
-    "expected_sources": [
-      "sqlmodel/main.py"
-    ],
-    "must_include_any": [
-      "Relationship",
-      "back_populates",
-      "metadata"
-    ],
-    "min_keyword_matches": 2
-  },
-  {
-    "id": "sqlmodel-session-exec",
-    "category": "specific-function",
-    "question": "What is special about Session.exec() in SQLModel?",
-    "ground_truth": "SQLModel provides a Session class with an exec helper that offers a friendlier typed wrapper around SQLAlchemy execution patterns, especially for SQLModel select statements. It is intended to make common query execution more ergonomic than raw SQLAlchemy session.execute calls.",
-    "expected_sources": [
-      "sqlmodel/orm/session.py",
-      "sqlmodel/__init__.py"
-    ],
-    "must_include_any": [
-      "Session",
-      "exec",
-      "execute",
-      "typed"
-    ],
-    "min_keyword_matches": 2
-  },
-  {
-    "id": "sqlmodel-async-session-exec",
-    "category": "specific-function",
-    "question": "How does async query execution work in SQLModel?",
-    "ground_truth": "SQLModel provides async session support under sqlmodel.ext.asyncio.session, including an async session wrapper that supports exec-style query execution for SQLModel statements in asynchronous applications.",
-    "expected_sources": [
-      "sqlmodel/ext/asyncio/session.py"
-    ],
-    "must_include_any": [
-      "async",
-      "AsyncSession",
-      "exec",
-      "greenlet"
-    ],
-    "min_keyword_matches": 2
-  },
-  {
-    "id": "sqlmodel-select-export",
-    "category": "specific-function",
-    "question": "How is select exposed to users in SQLModel?",
-    "ground_truth": "SQLModel re-exports a select helper from its SQL expression layer so users can write typed select statements directly from the sqlmodel package instead of importing SQLAlchemy primitives manually.",
-    "expected_sources": [
-      "sqlmodel/__init__.py",
-      "sqlmodel/sql/expression.py"
-    ],
-    "must_include_any": [
-      "select",
-      "re-export",
-      "expression",
-      "sqlmodel"
-    ],
-    "min_keyword_matches": 2
-  },
-  {
-    "id": "sqlmodel-create-engine-export",
-    "category": "specific-function",
-    "question": "How does SQLModel expose create_engine to application code?",
-    "ground_truth": "SQLModel re-exports create_engine from SQLAlchemy at the package level so users can import it directly from sqlmodel while using SQLModel models and sessions together.",
-    "expected_sources": [
-      "sqlmodel/__init__.py"
-    ],
-    "must_include_any": [
-      "create_engine",
-      "re-export",
-      "SQLAlchemy",
-      "sqlmodel"
-    ],
-    "min_keyword_matches": 2
-  },
-  {
-    "id": "sqlmodel-metadata-create-all",
-    "category": "config-setup",
-    "question": "How are database tables created when using SQLModel?",
-    "ground_truth": "Table creation typically happens by calling SQLModel.metadata.create_all(engine). SQLModel models register table metadata in a way that allows SQLAlchemy metadata creation workflows to build the underlying database tables.",
-    "expected_sources": [
-      "README.md",
-      "sqlmodel/main.py",
-      "docs_src"
-    ],
-    "must_include_any": [
-      "metadata",
-      "create_all",
-      "engine",
-      "table"
-    ],
-    "min_keyword_matches": 2
-  },
-  {
-    "id": "sqlmodel-package-exports",
-    "category": "config-setup",
-    "question": "What does sqlmodel.__init__ export for end users?",
-    "ground_truth": "The package initializer re-exports core user-facing APIs from SQLAlchemy and SQLModel, including create_engine, Session, SQLModel, Field, Relationship, and select-related helpers so application code can import most common primitives directly from sqlmodel.",
-    "expected_sources": [
-      "sqlmodel/__init__.py"
-    ],
-    "must_include_any": [
-      "Session",
-      "SQLModel",
-      "Field",
-      "create_engine"
+      "monorepo",
+      "Turborepo",
+      "apps",
+      "packages"
     ],
     "min_keyword_matches": 3
   },
   {
-    "id": "sqlmodel-readme-basic-flow",
-    "category": "config-setup",
-    "question": "What basic database workflow does the README show for SQLModel?",
-    "ground_truth": "The README demonstrates defining a SQLModel table model, creating an engine, creating tables with metadata.create_all, opening a Session, inserting rows, committing, and then selecting rows with select and session.exec.",
+    "id": "documenso-remix-hono-app",
+    "category": "architecture",
+    "question": "What role does apps/remix play in Documenso?",
+    "ground_truth": "apps/remix is the main application. The architecture describes it as a React Router/Remix app served by a Hono server, exposing UI routes alongside API mounts such as /api/v1, /api/v2, /api/trpc, and /api/jobs.",
+    "expected_sources": [
+      "ARCHITECTURE.md",
+      "apps/remix",
+      "apps/remix/server",
+      "apps/remix/app"
+    ],
+    "must_include_any": [
+      "React Router",
+      "Remix",
+      "Hono",
+      "apps/remix"
+    ],
+    "min_keyword_matches": 2
+  },
+  {
+    "id": "documenso-package-responsibilities",
+    "category": "architecture",
+    "question": "What are the main responsibilities of the core packages in Documenso?",
+    "ground_truth": "The core packages split responsibilities by layer: @documenso/lib holds server-only, client-only, and universal business logic; @documenso/trpc provides the current API V2 layer; @documenso/api maintains the older REST API V1; @documenso/prisma owns database access; @documenso/email owns React Email templates and mail delivery; @documenso/auth handles authentication; and @documenso/signing handles PDF signing.",
+    "expected_sources": [
+      "ARCHITECTURE.md",
+      "packages/lib",
+      "packages/trpc",
+      "packages/api",
+      "packages/prisma",
+      "packages/email",
+      "packages/auth",
+      "packages/signing"
+    ],
+    "must_include_any": [
+      "lib",
+      "trpc",
+      "prisma",
+      "email",
+      "signing"
+    ],
+    "min_keyword_matches": 3
+  },
+  {
+    "id": "documenso-api-architecture-overview",
+    "category": "architecture",
+    "question": "How does Documenso separate API V1, API V2, and internal tRPC APIs?",
+    "ground_truth": "Documenso keeps API V1 in packages/api/v1 using ts-rest, marks it as deprecated but maintained, and mounts it under /api/v1. API V2 lives under packages/trpc/server, uses tRPC plus trpc-to-openapi, and is mounted under /api/v2 and /api/v2-beta. Internal frontend-to-backend tRPC is mounted under /api/trpc and uses session-based auth.",
+    "expected_sources": [
+      "ARCHITECTURE.md",
+      "packages/api",
+      "packages/trpc/server",
+      "apps/remix/server"
+    ],
+    "must_include_any": [
+      "API V1",
+      "API V2",
+      "tRPC",
+      "ts-rest",
+      "OpenAPI"
+    ],
+    "min_keyword_matches": 3
+  },
+  {
+    "id": "documenso-readme-positioning",
+    "category": "docs",
+    "question": "How does the README position Documenso to someone evaluating the project?",
+    "ground_truth": "The README presents Documenso as the open-source DocuSign alternative and frames its mission around making digital document signing fast, easy, trustworthy, self-hostable, and inspectable under the hood.",
     "expected_sources": [
       "README.md"
     ],
     "must_include_any": [
-      "create_engine",
-      "Session",
-      "create_all",
-      "select"
-    ],
-    "min_keyword_matches": 3
-  },
-  {
-    "id": "sqlmodel-column-options-errors",
-    "category": "error-handling",
-    "question": "How does SQLModel guard against conflicting or invalid Field configuration?",
-    "ground_truth": "SQLModel performs validation around Field configuration in its core model code and raises errors when incompatible options are combined or when SQLAlchemy-specific arguments conflict with other field settings.",
-    "expected_sources": [
-      "sqlmodel/main.py"
-    ],
-    "must_include_any": [
-      "raise",
-      "Field",
-      "conflict",
-      "sa_column"
+      "DocuSign",
+      "open-source",
+      "self-host",
+      "trust"
     ],
     "min_keyword_matches": 2
   },
   {
-    "id": "sqlmodel-relationship-errors",
-    "category": "error-handling",
-    "question": "Where would SQLModel enforce invalid relationship configuration?",
-    "ground_truth": "Relationship configuration is handled in the core SQLModel model layer, where relationship metadata is collected and incompatible combinations are guarded before being translated to SQLAlchemy ORM behavior.",
+    "id": "documenso-readme-tech-stack",
+    "category": "docs",
+    "question": "What technology stack does the README advertise for Documenso?",
+    "ground_truth": "The README lists a TypeScript application using React Router, Prisma, Tailwind, shadcn/ui, React Email, tRPC, PDF signing tooling, React-PDF, PDF-Lib, and Stripe.",
     "expected_sources": [
-      "sqlmodel/main.py"
+      "README.md",
+      "ARCHITECTURE.md",
+      "package.json"
     ],
     "must_include_any": [
-      "Relationship",
-      "metadata",
-      "SQLAlchemy",
-      "raise"
+      "TypeScript",
+      "Prisma",
+      "tRPC",
+      "React Email",
+      "Stripe"
+    ],
+    "min_keyword_matches": 3
+  },
+  {
+    "id": "documenso-local-dev-quickstart",
+    "category": "docs",
+    "question": "What local development workflow does the README recommend for getting Documenso running quickly?",
+    "ground_truth": "The README and developer docs recommend using Node.js, Postgres, and optionally Docker. The quickstart has users copy or create an env file, run npm run dx to start supporting services such as Postgres and Inbucket, then run npm run dev for the app.",
+    "expected_sources": [
+      "README.md",
+      ".env.example",
+      "apps/docs/content/docs/developers/local-development/quickstart.mdx",
+      "docker"
+    ],
+    "must_include_any": [
+      "Node.js",
+      "Postgres",
+      "Docker",
+      "npm run dx",
+      "npm run dev"
+    ],
+    "min_keyword_matches": 3
+  },
+  {
+    "id": "documenso-self-hosting-docs",
+    "category": "docs",
+    "question": "What does the project documentation say about self-hosting Documenso?",
+    "ground_truth": "The README and docs describe self-hosting by cloning the repository, copying .env.example to .env, setting required web, database, encryption, signing, and SMTP-related variables, then deploying with Docker, Docker Compose, or a manual flow. The docs also cover configuration and maintenance topics.",
+    "expected_sources": [
+      "README.md",
+      ".env.example",
+      "docker",
+      "apps/docs/content/docs/self-hosting"
+    ],
+    "must_include_any": [
+      "self-host",
+      ".env.example",
+      "database",
+      "SMTP",
+      "Docker"
+    ],
+    "min_keyword_matches": 3
+  },
+  {
+    "id": "documenso-docs-app-purpose",
+    "category": "docs",
+    "question": "What is the purpose of the apps/docs application in the repository?",
+    "ground_truth": "apps/docs is the documentation site application. ARCHITECTURE.md identifies it as the docs site, while the app's own README, package.json, and source config show the current implementation as a Next.js/Fumadocs MDX app with content loading, docs layout, and a search route.",
+    "expected_sources": [
+      "ARCHITECTURE.md",
+      "apps/docs/README.md",
+      "apps/docs/package.json",
+      "apps/docs/source.config.ts",
+      "apps/docs/src/lib/source.ts",
+      "apps/docs/src/app/api/search/route.ts"
+    ],
+    "must_include_any": [
+      "documentation",
+      "Next.js",
+      "Fumadocs",
+      "search"
     ],
     "min_keyword_matches": 2
   },
   {
-    "id": "sqlmodel-session-cross-file",
-    "category": "cross-file",
-    "question": "How do SQLModel models flow into query execution with Session.exec()?",
-    "ground_truth": "Models are defined in the core SQLModel layer, queries are built through the SQL expression helpers such as select, and then those statements are executed through the SQLModel Session.exec wrapper, which ties model definitions and typed query execution together.",
+    "id": "documenso-required-env",
+    "category": "config-setup",
+    "question": "Which environment variables are central to running a self-hosted Documenso instance?",
+    "ground_truth": "The setup expects values such as NEXTAUTH_SECRET, NEXT_PRIVATE_ENCRYPTION_KEY, NEXT_PRIVATE_ENCRYPTION_SECONDARY_KEY, NEXT_PUBLIC_WEBAPP_URL, NEXT_PRIVATE_DATABASE_URL, NEXT_PRIVATE_DIRECT_DATABASE_URL, NEXT_PRIVATE_SMTP_FROM_NAME, and NEXT_PRIVATE_SMTP_FROM_ADDRESS. The env example and self-hosting docs also cover internal URLs, signing transport, storage transport, and optional OAuth and webhook configuration.",
     "expected_sources": [
-      "sqlmodel/main.py",
-      "sqlmodel/sql/expression.py",
-      "sqlmodel/orm/session.py"
+      "README.md",
+      ".env.example",
+      "apps/docs/content/docs/self-hosting/configuration/environment.mdx"
     ],
     "must_include_any": [
-      "select",
-      "Session",
-      "exec",
-      "model"
+      "NEXTAUTH_SECRET",
+      "NEXT_PUBLIC_WEBAPP_URL",
+      "DATABASE_URL",
+      "SMTP",
+      "encryption"
     ],
     "min_keyword_matches": 3
   },
   {
-    "id": "sqlmodel-sync-async-cross-file",
-    "category": "cross-file",
-    "question": "How does SQLModel support both sync and async session patterns across files?",
-    "ground_truth": "SQLModel exposes synchronous session helpers in its ORM session module and asynchronous support in the ext.asyncio package, giving similar exec-oriented ergonomics across both sync and async query paths.",
+    "id": "documenso-database-setup",
+    "category": "config-setup",
+    "question": "How is the database layer configured and managed in Documenso?",
+    "ground_truth": "Documenso uses PostgreSQL with Prisma and Kysely. Database connection URLs are configured through NEXT_PRIVATE_DATABASE_URL and NEXT_PRIVATE_DIRECT_DATABASE_URL, the self-hosting docs describe database setup, and schema or migration work is handled from the packages/prisma package with commands such as prisma migrations.",
     "expected_sources": [
-      "sqlmodel/orm/session.py",
-      "sqlmodel/ext/asyncio/session.py",
-      "sqlmodel/__init__.py"
+      "ARCHITECTURE.md",
+      ".env.example",
+      "apps/docs/content/docs/self-hosting/configuration/database.mdx",
+      "packages/prisma",
+      "packages/prisma/schema.prisma"
     ],
     "must_include_any": [
-      "sync",
-      "async",
-      "Session",
-      "exec"
+      "PostgreSQL",
+      "Prisma",
+      "Kysely",
+      "DATABASE_URL",
+      "migration"
     ],
     "min_keyword_matches": 3
   },
   {
-    "id": "sqlmodel-field-to-table-flow",
-    "category": "cross-file",
-    "question": "How do typed Field declarations become SQL table columns in SQLModel?",
-    "ground_truth": "Typed model attributes and Field metadata are collected in the SQLModel core model layer, where SQLModel builds SQLAlchemy-compatible field and table metadata so the resulting class can participate in SQLAlchemy table creation and ORM mapping.",
+    "id": "documenso-signing-config",
+    "category": "config-setup",
+    "question": "How is document signing configured for local and cloud-backed signing?",
+    "ground_truth": "Signing is configured with NEXT_PRIVATE_SIGNING_TRANSPORT. The env example and self-hosting docs document local signing as the default and also support gcloud-hsm with related key, certificate, credential, certificate chain, and timestamp authority configuration.",
     "expected_sources": [
-      "sqlmodel/main.py",
-      "sqlmodel/_compat.py"
+      ".env.example",
+      "apps/docs/content/docs/self-hosting/configuration/signing-certificate",
+      "packages/signing",
+      "packages/signing/transports"
     ],
     "must_include_any": [
-      "Field",
-      "column",
-      "table",
+      "NEXT_PRIVATE_SIGNING_TRANSPORT",
+      "local",
+      "gcloud-hsm",
+      "certificate",
+      "timestamp"
+    ],
+    "min_keyword_matches": 3
+  },
+  {
+    "id": "documenso-workspace-build-config",
+    "category": "config-setup",
+    "question": "Where should you look to understand package workspaces and build orchestration in Documenso?",
+    "ground_truth": "The root package.json defines npm workspaces and scripts, while turbo.json defines Turborepo task orchestration. ARCHITECTURE.md explains the monorepo layout and how apps and packages fit together.",
+    "expected_sources": [
+      "package.json",
+      "turbo.json",
+      "ARCHITECTURE.md"
+    ],
+    "must_include_any": [
+      "package.json",
+      "workspaces",
+      "turbo",
+      "Turborepo"
+    ],
+    "min_keyword_matches": 3
+  },
+  {
+    "id": "documenso-api-v2-document-router",
+    "category": "api",
+    "question": "Where is the current document API implemented and how is it exposed?",
+    "ground_truth": "The current API V2 is implemented under packages/trpc/server, with document operations organized under a document router. It is exposed through /api/v2 and /api/v2-beta with tRPC and OpenAPI support, and it accepts API-token or session-cookie authentication depending on the route.",
+    "expected_sources": [
+      "ARCHITECTURE.md",
+      "packages/trpc/server",
+      "packages/trpc/server/document-router",
+      "apps/remix/server"
+    ],
+    "must_include_any": [
+      "packages/trpc/server",
+      "document-router",
+      "API V2",
+      "OpenAPI",
+      "tRPC"
+    ],
+    "min_keyword_matches": 3
+  },
+  {
+    "id": "documenso-api-v1-deprecated",
+    "category": "api",
+    "question": "What is the older API V1 layer in Documenso and what is its status?",
+    "ground_truth": "API V1 lives under packages/api/v1, uses ts-rest for contract-based REST, is mounted under /api/v1, and is described as deprecated but maintained.",
+    "expected_sources": [
+      "ARCHITECTURE.md",
+      "packages/api",
+      "packages/api/v1"
+    ],
+    "must_include_any": [
+      "API V1",
+      "packages/api/v1",
+      "ts-rest",
+      "deprecated"
+    ],
+    "min_keyword_matches": 3
+  },
+  {
+    "id": "documenso-internal-trpc",
+    "category": "api",
+    "question": "How does the frontend talk to the backend internally in Documenso?",
+    "ground_truth": "The frontend uses an internal tRPC API mounted under /api/trpc for frontend-to-backend communication. This internal API is separate from the public API V1 and V2 routes and uses session-based authentication.",
+    "expected_sources": [
+      "ARCHITECTURE.md",
+      "apps/remix/server/trpc",
+      "apps/remix/server/router.ts",
+      "packages/trpc"
+    ],
+    "must_include_any": [
+      "/api/trpc",
+      "tRPC",
+      "frontend",
+      "session"
+    ],
+    "min_keyword_matches": 3
+  },
+  {
+    "id": "documenso-public-api-auth",
+    "category": "api",
+    "question": "How are public API requests authenticated in Documenso?",
+    "ground_truth": "Public API routes use API-token style authentication, typically through bearer or API-key headers. API V2 can also use session cookies where appropriate, while internal tRPC uses session-based auth.",
+    "expected_sources": [
+      "ARCHITECTURE.md",
+      "packages/lib/server-only/public-api",
+      "packages/trpc/server",
+      "packages/api"
+    ],
+    "must_include_any": [
+      "API Token",
+      "Bearer",
+      "session",
+      "public API"
+    ],
+    "min_keyword_matches": 2
+  },
+  {
+    "id": "documenso-openapi-support",
+    "category": "api",
+    "question": "Where does OpenAPI support fit into Documenso's API architecture?",
+    "ground_truth": "OpenAPI support appears in both API layers. API V2 generates an OpenAPI document from the tRPC app router in packages/trpc/server/open-api.ts and mounts it from the Remix/Hono server. API V1 is the older ts-rest layer under packages/api/v1 and also exposes an OpenAPI document through packages/api/hono.ts.",
+    "expected_sources": [
+      "ARCHITECTURE.md",
+      "apps/remix/server/router.ts",
+      "packages/trpc/server/open-api.ts",
+      "packages/api/hono.ts",
+      "packages/api/v1/openapi.ts"
+    ],
+    "must_include_any": [
+      "OpenAPI",
+      "trpc-to-openapi",
+      "tRPC",
+      "API V2"
+    ],
+    "min_keyword_matches": 3
+  },
+  {
+    "id": "documenso-document-business-logic",
+    "category": "specific-function",
+    "question": "Where is document business logic likely implemented in Documenso?",
+    "ground_truth": "Document business logic belongs primarily in packages/lib/server-only/document, with API-facing operations routed through packages/trpc/server/document-router or the legacy packages/api layer. Database persistence is supported by packages/prisma.",
+    "expected_sources": [
+      "ARCHITECTURE.md",
+      "packages/lib/server-only/document",
+      "packages/trpc/server/document-router",
+      "packages/prisma"
+    ],
+    "must_include_any": [
+      "server-only",
+      "document",
+      "document-router",
+      "prisma"
+    ],
+    "min_keyword_matches": 3
+  },
+  {
+    "id": "documenso-recipient-field-logic",
+    "category": "specific-function",
+    "question": "Where should you look for recipient and field behavior in Documenso?",
+    "ground_truth": "Recipient and field behavior is split between packages/lib/server-only/recipient and packages/lib/server-only/field for core logic, with packages/trpc/server/recipient-router and packages/trpc/server/field-router exposing API operations.",
+    "expected_sources": [
+      "packages/lib/server-only/recipient",
+      "packages/lib/server-only/field",
+      "packages/trpc/server/recipient-router",
+      "packages/trpc/server/field-router",
+      "ARCHITECTURE.md"
+    ],
+    "must_include_any": [
+      "recipient",
+      "field",
+      "server-only",
+      "router"
+    ],
+    "min_keyword_matches": 3
+  },
+  {
+    "id": "documenso-template-envelope-logic",
+    "category": "specific-function",
+    "question": "How are templates and envelopes represented in the codebase?",
+    "ground_truth": "Templates and envelopes have their own server-only domain areas under packages/lib/server-only/template and packages/lib/server-only/envelope. API V2 also organizes routes into template-router and envelope-router directories under packages/trpc/server.",
+    "expected_sources": [
+      "ARCHITECTURE.md",
+      "packages/lib/server-only/template",
+      "packages/lib/server-only/envelope",
+      "packages/trpc/server/template-router",
+      "packages/trpc/server/envelope-router"
+    ],
+    "must_include_any": [
+      "template",
+      "envelope",
+      "server-only",
+      "router"
+    ],
+    "min_keyword_matches": 3
+  },
+  {
+    "id": "documenso-email-templates",
+    "category": "specific-function",
+    "question": "How are lifecycle emails represented in Documenso?",
+    "ground_truth": "Lifecycle emails live in the @documenso/email package, with React Email templates under packages/email/templates. The package also includes mailer, transports, providers, render helpers, and reusable template components.",
+    "expected_sources": [
+      "ARCHITECTURE.md",
+      "packages/email",
+      "packages/email/templates",
+      "packages/email/mailer.ts",
+      "packages/email/render.tsx"
+    ],
+    "must_include_any": [
+      "React Email",
+      "templates",
+      "mailer",
+      "transports"
+    ],
+    "min_keyword_matches": 3
+  },
+  {
+    "id": "documenso-signing-package",
+    "category": "specific-function",
+    "question": "What does the signing package do in Documenso?",
+    "ground_truth": "The @documenso/signing package owns PDF signing behavior. Its signPdf entry point selects a signing transport, applies timestamp authority settings when configured, and supports local P12 signing and Google Cloud KMS/HSM-backed signing through transport implementations.",
+    "expected_sources": [
+      "ARCHITECTURE.md",
+      "packages/signing/index.ts",
+      "packages/signing/helpers",
+      "packages/signing/transports",
+      ".env.example"
+    ],
+    "must_include_any": [
+      "PDF signing",
+      "transports",
+      "local",
+      "Google",
+      "KMS"
+    ],
+    "min_keyword_matches": 3
+  },
+  {
+    "id": "documenso-job-system",
+    "category": "specific-function",
+    "question": "What role do jobs play in Documenso?",
+    "ground_truth": "Jobs handle asynchronous operations such as email sending, document sealing, reminders, and webhooks. The architecture describes Inngest or local providers, with job definitions and clients under packages/lib/jobs.",
+    "expected_sources": [
+      "ARCHITECTURE.md",
+      "packages/lib/jobs",
+      "packages/lib/server-only/email",
+      "packages/lib/server-only/webhooks"
+    ],
+    "must_include_any": [
+      "jobs",
+      "Inngest",
+      "local",
+      "email",
+      "webhooks"
+    ],
+    "min_keyword_matches": 3
+  },
+  {
+    "id": "documenso-document-send-flow",
+    "category": "cross-file",
+    "question": "How does a document send operation flow across the Documenso codebase?",
+    "ground_truth": "A document send operation starts at an API or UI route, goes through the API layer such as packages/trpc/server/document-router, delegates core behavior to packages/lib/server-only/document and related recipient or field logic, persists through packages/prisma, and can trigger emails or jobs through packages/email and packages/lib/jobs.",
+    "expected_sources": [
+      "packages/trpc/server/document-router",
+      "packages/lib/server-only/document",
+      "packages/lib/server-only/recipient",
+      "packages/prisma",
+      "packages/email",
+      "packages/lib/jobs"
+    ],
+    "must_include_any": [
+      "document-router",
+      "server-only/document",
+      "prisma",
+      "email",
+      "jobs"
+    ],
+    "min_keyword_matches": 3
+  },
+  {
+    "id": "documenso-signing-completion-flow",
+    "category": "cross-file",
+    "question": "How do recipient fields, PDF handling, signing, and completion emails connect?",
+    "ground_truth": "Signing completion crosses several packages: recipient and field logic model who signs and which fields are completed, the seal-document job prepares the completed PDF, server-only PDF helpers insert fields/certificates/audit logs, @documenso/signing applies cryptographic signing, Prisma persists state, and document-completed email templates notify participants.",
+    "expected_sources": [
+      "packages/lib/server-only/recipient",
+      "packages/lib/server-only/field",
+      "packages/lib/server-only/pdf",
+      "packages/lib/jobs/definitions/internal/seal-document.handler.ts",
+      "packages/signing",
+      "packages/prisma",
+      "packages/email/templates/document-completed.tsx"
+    ],
+    "must_include_any": [
+      "recipient",
+      "field",
+      "PDF",
+      "signing",
+      "document-completed"
+    ],
+    "min_keyword_matches": 3
+  },
+  {
+    "id": "documenso-webhook-job-flow",
+    "category": "cross-file",
+    "question": "How do background jobs and webhooks complement each other in Documenso?",
+    "ground_truth": "Background jobs handle asynchronous work, and webhook logic lives under packages/lib/server-only/webhooks. Together they allow document lifecycle events to be processed outside the immediate request path and delivered to external integrations.",
+    "expected_sources": [
+      "ARCHITECTURE.md",
+      "packages/lib/jobs",
+      "packages/lib/server-only/webhooks",
+      ".env.example"
+    ],
+    "must_include_any": [
+      "jobs",
+      "webhooks",
+      "asynchronous",
+      "events"
+    ],
+    "min_keyword_matches": 3
+  },
+  {
+    "id": "documenso-ui-to-api-flow",
+    "category": "cross-file",
+    "question": "How does the Remix UI connect to server routes and shared API packages?",
+    "ground_truth": "The Remix UI is under apps/remix/app with route definitions and root app wiring. The server side under apps/remix/server wires routers and context, then connects to the shared packages/trpc APIs and packages/lib business logic.",
+    "expected_sources": [
+      "apps/remix/app/routes.ts",
+      "apps/remix/app/root.tsx",
+      "apps/remix/server/router.ts",
+      "apps/remix/server/context.ts",
+      "packages/trpc",
+      "packages/lib"
+    ],
+    "must_include_any": [
+      "apps/remix/app",
+      "apps/remix/server",
+      "router",
+      "context",
+      "tRPC"
+    ],
+    "min_keyword_matches": 3
+  },
+  {
+    "id": "documenso-storage-pdf-flow",
+    "category": "cross-file",
+    "question": "How do storage, PDF processing, and database state fit together?",
+    "ground_truth": "The architecture separates storage provider concerns, PDF handling, and database state. Server-side PDF behavior lives under packages/lib/server-only/pdf, upload and download storage logic lives under packages/lib/universal/upload, document data records are created through packages/lib/server-only/document-data, and packages/prisma persists metadata and workflow state.",
+    "expected_sources": [
+      "ARCHITECTURE.md",
+      "packages/lib/server-only/pdf",
+      "packages/lib/server-only/document-data",
+      "packages/prisma",
+      "packages/lib/universal/upload"
+    ],
+    "must_include_any": [
+      "storage",
+      "PDF",
+      "database",
+      "prisma",
       "metadata"
     ],
     "min_keyword_matches": 3
   },
   {
-    "id": "sqlmodel-docs-fastapi-positioning",
-    "category": "docs",
-    "question": "How does the project describe SQLModel's relationship to FastAPI in its docs or README?",
-    "ground_truth": "The project describes SQLModel as being designed to simplify SQL database work in FastAPI applications and emphasizes that it is created by the same author, with strong compatibility between FastAPI, Pydantic, and SQLAlchemy.",
+    "id": "documenso-auth-session-flow",
+    "category": "cross-file",
+    "question": "How does authentication show up across Documenso's app and packages?",
+    "ground_truth": "Authentication spans the @documenso/auth package, server-only auth logic under packages/lib/server-only/auth, app server context in apps/remix/server/context.ts, and API layers that choose between session cookies and API tokens.",
     "expected_sources": [
-      "README.md",
-      "docs"
+      "ARCHITECTURE.md",
+      "packages/auth",
+      "packages/lib/server-only/auth",
+      "apps/remix/server/context.ts",
+      "packages/trpc/server"
     ],
     "must_include_any": [
-      "FastAPI",
-      "same author",
-      "compatibility"
+      "auth",
+      "session",
+      "API token",
+      "context"
+    ],
+    "min_keyword_matches": 3
+  },
+  {
+    "id": "documenso-public-api-errors",
+    "category": "error-handling",
+    "question": "Where would Documenso validate or reject bad public API requests?",
+    "ground_truth": "Bad public API requests are validated in the API layer and supporting server-only public API logic. The relevant code is under packages/trpc/server for API V2, packages/api for API V1, and packages/lib/server-only/public-api for shared public API behavior such as authentication, permissions, and validation.",
+    "expected_sources": [
+      "packages/trpc/server",
+      "packages/api",
+      "packages/lib/server-only/public-api"
+    ],
+    "must_include_any": [
+      "validation",
+      "API",
+      "auth",
+      "public-api"
     ],
     "min_keyword_matches": 2
   },
   {
-    "id": "sqlmodel-followup-show-session-code",
+    "id": "documenso-webhook-security-errors",
+    "category": "error-handling",
+    "question": "Where should you look for webhook security or SSRF-related safeguards?",
+    "ground_truth": "Webhook safeguards belong in packages/lib/server-only/webhooks, with related configuration documented in .env.example such as NEXT_PRIVATE_WEBHOOK_SSRF_BYPASS_HOSTS. These sources explain where outbound webhook behavior and security exceptions are controlled.",
+    "expected_sources": [
+      ".env.example",
+      "packages/lib/server-only/webhooks"
+    ],
+    "must_include_any": [
+      "webhook",
+      "SSRF",
+      "bypass",
+      "hosts"
+    ],
+    "min_keyword_matches": 2
+  },
+  {
+    "id": "documenso-signing-config-errors",
+    "category": "error-handling",
+    "question": "Where would invalid signing configuration most likely be enforced?",
+    "ground_truth": "Invalid signing configuration is handled by the signing package and the code that reads signing environment variables. The key sources are .env.example for supported values, packages/signing/index.ts for transport selection and unsupported transport errors, and packages/signing/transports for local or gcloud-hsm certificate/key validation.",
+    "expected_sources": [
+      ".env.example",
+      "packages/signing/index.ts",
+      "packages/signing/transports",
+      "packages/signing/helpers"
+    ],
+    "must_include_any": [
+      "signing",
+      "transport",
+      "local",
+      "gcloud-hsm"
+    ],
+    "min_keyword_matches": 3
+  },
+  {
+    "id": "documenso-playwright-tests",
+    "category": "tests",
+    "question": "Where does Documenso keep end-to-end app tests?",
+    "ground_truth": "The architecture identifies @documenso/app-tests as the E2E test package, and the packages/app-tests directory is intended for Playwright coverage of app behavior.",
+    "expected_sources": [
+      "ARCHITECTURE.md",
+      "packages/app-tests",
+      "packages/app-tests/package.json"
+    ],
+    "must_include_any": [
+      "app-tests",
+      "E2E",
+      "Playwright"
+    ],
+    "min_keyword_matches": 2
+  },
+  {
+    "id": "documenso-package-test-config",
+    "category": "tests",
+    "question": "How can you find package-level test configuration for shared logic?",
+    "ground_truth": "Package-level tests and configuration can be found near the package they cover, such as packages/lib/vitest.config.ts for shared library tests and package.json scripts in the relevant package directories.",
+    "expected_sources": [
+      "packages/lib/vitest.config.ts",
+      "packages/lib/package.json",
+      "packages"
+    ],
+    "must_include_any": [
+      "vitest",
+      "package.json",
+      "packages/lib"
+    ],
+    "min_keyword_matches": 2
+  },
+  {
+    "id": "documenso-email-template-tests",
+    "category": "tests",
+    "question": "What should be tested when changing document lifecycle email behavior?",
+    "ground_truth": "A good answer should point to packages/email templates and rendering/mailer code, and should mention checking template output, variables, delivery behavior, and any app or E2E tests that cover document lifecycle notifications.",
+    "expected_sources": [
+      "packages/email/templates",
+      "packages/email/render.tsx",
+      "packages/email/mailer.ts",
+      "packages/app-tests"
+    ],
+    "must_include_any": [
+      "email",
+      "templates",
+      "render",
+      "mailer",
+      "tests"
+    ],
+    "min_keyword_matches": 3
+  },
+  {
+    "id": "documenso-followup-api-v2-code-path",
     "category": "conversation",
     "turns": [
       {
         "role": "user",
-        "content": "How does SQLModel make query execution easier than raw SQLAlchemy?"
+        "content": "How does Documenso expose document operations in the current public API?"
       },
       {
         "role": "assistant",
-        "content": "It provides a Session.exec helper and package-level exports to simplify common query patterns."
+        "content": "The current public API is API V2, implemented through the tRPC server package and document router, with OpenAPI support."
       }
     ],
     "question": "show me the code path for that",
-    "ground_truth": "The follow-up should stay anchored to Session.exec and SQLModel query ergonomics, retrieving code from the session wrapper and related SQLModel exports instead of drifting to README-only results.",
+    "ground_truth": "The follow-up should stay anchored to packages/trpc/server/document-router and the apps/remix server routing that mounts API V2. It should avoid drifting to README-only setup material.",
     "expected_sources": [
-      "sqlmodel/orm/session.py",
-      "sqlmodel/__init__.py",
-      "sqlmodel/sql/expression.py"
+      "packages/trpc/server/document-router",
+      "packages/trpc/server",
+      "apps/remix/server/router.ts",
+      "ARCHITECTURE.md"
     ],
     "must_include_any": [
-      "Session",
-      "exec",
-      "select"
-    ],
-    "min_keyword_matches": 2
-  },
-  {
-    "id": "sqlmodel-select-implementation-layer",
-    "category": "specific-function",
-    "question": "Where is select implemented under the hood and how is that different from how it is exposed publicly?",
-    "ground_truth": "SQLModel exposes select through package-level imports such as sqlmodel.__init__ and sqlmodel.sql.expression, while the implementation details and overload-heavy generation live in lower-level SQL expression modules like _expression_select_gen.py and related select classes.",
-    "expected_sources": [
-      "sqlmodel/__init__.py",
-      "sqlmodel/sql/expression.py",
-      "sqlmodel/sql/_expression_select_gen.py",
-      "sqlmodel/sql/_expression_select_cls.py"
-    ],
-    "must_include_any": [
-      "select",
-      "public",
-      "implementation",
-      "re-export"
-    ],
-    "min_keyword_matches": 2
-  },
-  {
-    "id": "sqlmodel-async-session-delegation",
-    "category": "cross-file",
-    "question": "How does AsyncSession.exec reuse the synchronous Session.exec path?",
-    "ground_truth": "The async session layer delegates execution to the synchronous Session.exec logic rather than duplicating it. AsyncSession uses greenlet-based bridging so async callers can reuse the sync execution wrapper and still get SQLModel-style exec ergonomics.",
-    "expected_sources": [
-      "sqlmodel/ext/asyncio/session.py",
-      "sqlmodel/orm/session.py"
-    ],
-    "must_include_any": [
-      "AsyncSession",
-      "Session",
-      "greenlet",
-      "exec"
+      "document-router",
+      "packages/trpc/server",
+      "API V2",
+      "router"
     ],
     "min_keyword_matches": 3
   },
   {
-    "id": "sqlmodel-select-tutorial-usage",
-    "category": "docs",
-    "question": "How do the docs teach people to use select together with Session.exec?",
-    "ground_truth": "The tutorials show users building a statement with select(...) and then executing it through Session.exec(...), positioning exec as the ergonomic query entry point for SQLModel statements.",
+    "id": "documenso-followup-email-flow",
+    "category": "conversation",
+    "turns": [
+      {
+        "role": "user",
+        "content": "What happens after a document is sent for signing?"
+      },
+      {
+        "role": "assistant",
+        "content": "The send flow updates document state, recipient state, jobs, and lifecycle emails."
+      }
+    ],
+    "question": "where does the email part live?",
+    "ground_truth": "The follow-up should retrieve packages/email templates, mailer/render code, and any server-only email or job code that triggers those templates.",
     "expected_sources": [
-      "docs/tutorial/select.md",
-      "README.md"
+      "packages/email/templates",
+      "packages/email/mailer.ts",
+      "packages/email/render.tsx",
+      "packages/lib/server-only/email",
+      "packages/lib/jobs"
     ],
     "must_include_any": [
-      "select",
-      "Session",
-      "exec",
-      "statement"
+      "packages/email",
+      "templates",
+      "mailer",
+      "jobs"
     ],
     "min_keyword_matches": 3
   },
   {
-    "id": "sqlmodel-fastapi-response-model-docs",
-    "category": "docs",
-    "question": "How do the FastAPI docs describe using SQLModel models as response models?",
-    "ground_truth": "The FastAPI-focused docs explain that SQLModel classes can participate in API request and response modeling because they build on Pydantic, letting applications reuse models or related model variants in response_model patterns.",
-    "expected_sources": [
-      "docs/tutorial/fastapi/response-model.md",
-      "README.md"
+    "id": "documenso-followup-self-hosting-config",
+    "category": "conversation",
+    "turns": [
+      {
+        "role": "user",
+        "content": "How do I run Documenso myself?"
+      },
+      {
+        "role": "assistant",
+        "content": "Self-hosting uses the README flow: copy .env.example, set required URLs, database, SMTP, and secrets, run migrations, then start apps/remix."
+      }
     ],
-    "must_include_any": [
-      "FastAPI",
-      "response_model",
-      "Pydantic",
-      "model"
-    ],
-    "min_keyword_matches": 2
-  },
-  {
-    "id": "sqlmodel-independent-library-positioning",
-    "category": "docs",
-    "question": "Does the project describe SQLModel as FastAPI-only or as a standalone library too?",
-    "ground_truth": "The docs position SQLModel as especially strong with FastAPI, but still as an independent library that can be used outside FastAPI. It is not described as FastAPI-only.",
+    "question": "which config files should I inspect?",
+    "ground_truth": "The follow-up should point to .env.example, README self-hosting instructions, package.json or turbo config for scripts, and apps/remix for where the app starts.",
     "expected_sources": [
+      ".env.example",
       "README.md",
-      "docs/features.md",
-      "docs/index.md"
+      "package.json",
+      "turbo.json",
+      "apps/remix"
     ],
     "must_include_any": [
-      "FastAPI",
-      "independent",
-      "library",
-      "not"
-    ],
-    "min_keyword_matches": 2
-  },
-  {
-    "id": "sqlmodel-sa-relationship-test-guard",
-    "category": "tests",
-    "question": "What invalid Relationship combinations are guarded by tests?",
-    "ground_truth": "The relationship tests cover invalid combinations where a pre-built sa_relationship is mixed with sa_relationship_args or sa_relationship_kwargs, confirming that SQLModel raises when overlapping relationship configuration styles are combined.",
-    "expected_sources": [
-      "tests/test_field_sa_relationship.py",
-      "sqlmodel/main.py"
-    ],
-    "must_include_any": [
-      "sa_relationship",
-      "args",
-      "kwargs",
-      "raise"
+      ".env.example",
+      "README",
+      "package.json",
+      "apps/remix"
     ],
     "min_keyword_matches": 3
   },
   {
-    "id": "sqlmodel-ondelete-nullable-test",
-    "category": "tests",
-    "question": "What does the project test about ondelete and nullable relationship fields?",
-    "ground_truth": "The test suite checks that using ondelete='SET NULL' on a non-nullable relationship field is invalid. The model layer should raise because SET NULL requires the underlying foreign key column to be nullable.",
-    "expected_sources": [
-      "tests/test_ondelete_raises.py",
-      "sqlmodel/main.py"
-    ],
-    "must_include_any": [
-      "ondelete",
-      "SET NULL",
-      "nullable",
-      "raise"
-    ],
-    "min_keyword_matches": 3
-  },
-  {
-    "id": "sqlmodel-type-validation-test",
-    "category": "tests",
-    "question": "What do the tests suggest about invalid SQLAlchemy or field type combinations in SQLModel?",
-    "ground_truth": "The tests indicate that SQLModel raises when unsupported or ambiguous field type combinations are mapped into SQLAlchemy columns, reinforcing that not every Python type annotation can become a database column shape automatically.",
-    "expected_sources": [
-      "tests/test_sqlalchemy_type_errors.py",
-      "sqlmodel/main.py"
-    ],
-    "must_include_any": [
-      "type",
-      "SQLAlchemy",
-      "raise",
-      "column"
-    ],
-    "min_keyword_matches": 2
-  },
-  {
-    "id": "sqlmodel-readme-engine-session-imports",
-    "category": "config-setup",
-    "question": "What top-level imports does the README encourage for getting started with SQLModel?",
-    "ground_truth": "The README encourages importing SQLModel, Field, Session, create_engine, and select from the top-level sqlmodel package so users can define models, create tables, and run queries with a unified import style.",
-    "expected_sources": [
-      "README.md",
-      "sqlmodel/__init__.py"
-    ],
-    "must_include_any": [
-      "SQLModel",
-      "Field",
-      "Session",
-      "create_engine",
-      "select"
-    ],
-    "min_keyword_matches": 4
-  },
-  {
-    "id": "sqlmodel-many-to-many-link-model-docs",
-    "category": "docs",
-    "question": "How do the relationship docs explain link_model for many-to-many mappings?",
-    "ground_truth": "The relationship docs explain that link_model is used as an association or link table model for many-to-many relationships, letting SQLModel connect two models through an explicit intermediary model.",
-    "expected_sources": [
-      "docs/tutorial/many-to-many/create-models-with-link.md",
-      "sqlmodel/main.py"
-    ],
-    "must_include_any": [
-      "link_model",
-      "many-to-many",
-      "association",
-      "relationship"
-    ],
-    "min_keyword_matches": 3
-  },
-  {
-    "id": "sqlmodel-followup-async-code-path",
+    "id": "documenso-followup-signing-bridge",
     "category": "conversation",
     "turns": [
       {
         "role": "user",
-        "content": "How does async query execution work in SQLModel?"
+        "content": "How does Documenso seal or sign completed documents?"
       },
       {
         "role": "assistant",
-        "content": "It uses AsyncSession and bridges into the sync session execution path."
+        "content": "PDF completion crosses server-only PDF/document logic and the @documenso/signing package, which supports local and Google-backed signing transports."
       }
     ],
-    "question": "show me where that bridge happens",
-    "ground_truth": "The follow-up should stay on the async execution path and retrieve the async session module together with the sync session module it delegates to, rather than drifting to docs-only summaries.",
+    "question": "show me where signing plugs in",
+    "ground_truth": "The follow-up should retrieve packages/signing, especially the signPdf entry point, transports, and helpers, plus the seal-document job where completed PDFs are decorated and passed into signing, and signing-related env configuration.",
     "expected_sources": [
-      "sqlmodel/ext/asyncio/session.py",
-      "sqlmodel/orm/session.py"
+      "packages/signing/index.ts",
+      "packages/signing/transports",
+      "packages/signing/helpers",
+      "packages/lib/jobs/definitions/internal/seal-document.handler.ts",
+      ".env.example"
     ],
     "must_include_any": [
-      "AsyncSession",
-      "greenlet",
-      "Session",
-      "exec"
+      "packages/signing",
+      "transports",
+      "PDF",
+      "signing"
     ],
     "min_keyword_matches": 3
   },
   {
-    "id": "sqlmodel-followup-field-column-path",
-    "category": "conversation",
-    "turns": [
-      {
-        "role": "user",
-        "content": "How do typed Field declarations become SQL table columns in SQLModel?"
-      },
-      {
-        "role": "assistant",
-        "content": "The metaclass and field helpers translate Field metadata into SQLAlchemy Column objects."
-      }
-    ],
-    "question": "show me the main code path for that conversion",
-    "ground_truth": "The follow-up should stay anchored to the field-to-column conversion path in the core model implementation instead of drifting to tutorial prose alone.",
-    "expected_sources": [
-      "sqlmodel/main.py",
-      "sqlmodel/_compat.py"
-    ],
-    "must_include_any": [
-      "Field",
-      "Column",
-      "metaclass",
-      "conversion"
-    ],
-    "min_keyword_matches": 3
-  },
-  {
-    "id": "sqlmodel-followup-select-public-path",
-    "category": "conversation",
-    "turns": [
-      {
-        "role": "user",
-        "content": "How is select exposed to users in SQLModel?"
-      },
-      {
-        "role": "assistant",
-        "content": "It is re-exported for public use from the SQLModel package and expression layer."
-      }
-    ],
-    "question": "and where is the lower-level implementation behind that?",
-    "ground_truth": "The follow-up should connect the public export path to the lower-level select generator and select class implementation files instead of repeating only the package-level export story.",
-    "expected_sources": [
-      "sqlmodel/sql/expression.py",
-      "sqlmodel/sql/_expression_select_gen.py",
-      "sqlmodel/sql/_expression_select_cls.py"
-    ],
-    "must_include_any": [
-      "select",
-      "implementation",
-      "expression",
-      "class"
-    ],
-    "min_keyword_matches": 2
-  },
-  {
-    "id": "sqlmodel-test-vs-core-evidence-balance",
-    "category": "cross-file",
-    "question": "When explaining configuration errors in SQLModel, how should core implementation and tests complement each other?",
-    "ground_truth": "The core implementation in sqlmodel/main.py is the canonical source for behavior, while tests such as relationship and ondelete checks provide evidence that those guards are enforced in concrete scenarios. A good answer should balance both without treating tests as the primary implementation source.",
-    "expected_sources": [
-      "sqlmodel/main.py",
-      "tests/test_field_sa_relationship.py",
-      "tests/test_ondelete_raises.py"
-    ],
-    "must_include_any": [
-      "main.py",
-      "tests",
-      "canonical",
-      "guard"
-    ],
-    "min_keyword_matches": 2
-  },
-  {
-    "id": "sqlmodel-docs-vs-core-select-balance",
-    "category": "cross-file",
-    "question": "For explaining select in SQLModel, which files are canonical implementation sources and which are usage-oriented docs?",
-    "ground_truth": "The canonical implementation path is in sqlmodel.__init__, sqlmodel.sql.expression, and the lower-level select generator or select class modules, while files like README and docs/tutorial/select.md are usage-oriented documentation rather than the implementation itself.",
-    "expected_sources": [
-      "sqlmodel/__init__.py",
-      "sqlmodel/sql/expression.py",
-      "sqlmodel/sql/_expression_select_gen.py",
-      "sqlmodel/sql/_expression_select_cls.py",
-      "docs/tutorial/select.md",
-      "README.md"
-    ],
-    "must_include_any": [
-      "canonical",
-      "implementation",
-      "docs",
-      "usage"
-    ],
-    "min_keyword_matches": 2
-  },
-  {
-    "id": "sqlmodel-features-doc-positioning",
-    "category": "docs",
-    "question": "What themes does the features documentation emphasize about SQLModel's value proposition?",
-    "ground_truth": "The features docs emphasize reduced duplication, editor friendliness, compatibility across Pydantic and SQLAlchemy, and an ergonomic way to work with SQL databases using standard Python type hints and models.",
-    "expected_sources": [
-      "docs/features.md",
-      "README.md"
-    ],
-    "must_include_any": [
-      "duplication",
-      "editor",
-      "compatibility",
-      "Python"
-    ],
-    "min_keyword_matches": 2
-  },
-  {
-    "id": "sqlmodel-docs-index-overview",
-    "category": "docs",
-    "question": "What kind of project overview should a user get from the docs index for SQLModel?",
-    "ground_truth": "The docs index should frame SQLModel as a Python SQL library that combines data modeling and database access patterns, point users toward tutorials or feature explanations, and reinforce its relationship to Pydantic, SQLAlchemy, and FastAPI.",
-    "expected_sources": [
-      "docs/index.md",
-      "README.md"
-    ],
-    "must_include_any": [
-      "overview",
-      "Pydantic",
-      "SQLAlchemy",
-      "FastAPI"
-    ],
-    "min_keyword_matches": 2
-  },
-  {
-    "id": "sqlmodel-sa-column-conflict-error",
-    "category": "error-handling",
-    "question": "What happens if you pass both sa_column and other Field options like primary_key or index in SQLModel?",
-    "ground_truth": "SQLModel raises a RuntimeError when sa_column is combined with other field-level options like primary_key, index, or foreign_key because sa_column is meant to be a fully self-contained SQLAlchemy column definition and mixing it with SQLModel field shortcuts creates an ambiguous configuration.",
-    "expected_sources": [
-      "sqlmodel/main.py"
-    ],
-    "must_include_any": [
-      "sa_column",
-      "primary_key",
-      "raise",
-      "conflict"
-    ],
-    "min_keyword_matches": 3
-  },
-  {
-    "id": "sqlmodel-codegen-basic-model",
+    "id": "documenso-codegen-email-template-checklist",
     "category": "code-generation",
-    "question": "Write a SQLModel table model for a User with an integer primary key, a required name string, and an optional email string",
-    "ground_truth": "A correct answer defines a class inheriting from SQLModel with table=True, uses Field(primary_key=True) on an integer id, declares name as a required str, and declares email as Optional[str] with a default of None.",
+    "question": "Write a short implementation checklist for adding a new document lifecycle email template in Documenso",
+    "ground_truth": "A good checklist should mention adding a React Email template under packages/email/templates, wiring rendering or mailer usage if needed, passing required variables from server-side document or job logic, and covering the change with focused tests or previews.",
     "expected_sources": [
-      "sqlmodel/main.py",
-      "README.md",
-      "docs_src"
+      "packages/email/templates",
+      "packages/email/mailer.ts",
+      "packages/email/render.tsx",
+      "packages/lib/jobs",
+      "packages/lib/server-only/document"
     ],
     "must_include_any": [
-      "SQLModel",
-      "Field",
-      "table=True",
-      "primary_key",
-      "Optional"
+      "packages/email/templates",
+      "React Email",
+      "mailer",
+      "jobs",
+      "tests"
     ],
     "min_keyword_matches": 3
   },
   {
-    "id": "sqlmodel-codegen-session-query",
+    "id": "documenso-codegen-api-route-checklist",
     "category": "code-generation",
-    "question": "Write a SQLModel example that creates an engine, opens a session, inserts a User row, and queries all users",
-    "ground_truth": "A correct answer uses create_engine to set up the database, SQLModel.metadata.create_all to create tables, opens a Session using a context manager, adds and commits a User instance, then uses select(User) with session.exec to retrieve all rows.",
+    "question": "Write a short implementation checklist for adding a new API V2 document operation in Documenso",
+    "ground_truth": "A good checklist should point to packages/trpc/server and the document-router, define request and response types or schemas, delegate business logic to packages/lib/server-only/document, update OpenAPI exposure if applicable, persist with Prisma when needed, and add tests.",
     "expected_sources": [
-      "README.md",
-      "sqlmodel/__init__.py",
-      "sqlmodel/orm/session.py",
-      "docs/tutorial/create-db-and-table.md",
-      "docs/tutorial/insert.md",
-      "docs/tutorial/select.md"
+      "packages/trpc/server/document-router",
+      "packages/trpc/server",
+      "packages/lib/server-only/document",
+      "packages/prisma",
+      "ARCHITECTURE.md"
     ],
     "must_include_any": [
-      "create_engine",
-      "Session",
-      "select",
-      "exec",
-      "commit"
+      "document-router",
+      "tRPC",
+      "OpenAPI",
+      "server-only/document",
+      "Prisma"
     ],
-    "min_keyword_matches": 4
+    "min_keyword_matches": 3
   }
 ]
