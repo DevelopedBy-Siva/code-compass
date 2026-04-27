@@ -312,28 +312,30 @@ The project includes a measurable end-to-end evaluation workflow alongside the p
 
 ### Benchmark Snapshot
 
-Latest expanded internal benchmark:
-- 37 evaluation cases
-- 8 categories
+Current sample benchmark:
+- 40 evaluation cases
+- 9 categories
 - 4 multi-turn conversation cases
-
-Headline metrics from the current benchmark run:
+- SQLModel-focused sample set, useful for internal iteration but not a broad public benchmark
 
 | Metric | Result |
 | --- | ---: |
-| Retrieval hit rate | 95.0% |
-| Top-1 hit rate | 75.0% |
-| Mean reciprocal rank | 0.85 |
-| Source recall | 74.2% |
-| Faithfulness (RAGAS) | 0.917 |
-| Answer relevancy (RAGAS) | 0.843 |
-| Context precision (RAGAS) | 0.767 |
+| Retrieval hit rate | 90.0% |
+| Top-1 hit rate | 80.0% |
+| Mean reciprocal rank | 0.846 |
+| Source recall | 61.5% |
+| Grounded answer rate | 57.5% |
+| Keyword/checklist pass rate | 80.0% |
+| Reference-support pass rate | 87.5% |
+| Faithfulness (RAGAS, supporting) | 0.716 |
+| Answer relevancy (RAGAS, supporting) | 0.649 |
+| Context precision (RAGAS, supporting) | 0.503 |
 
 What these numbers mean:
-- the system retrieves at least one relevant source for the large majority of benchmark cases
-- the first-ranked source is relevant in most cases, with the biggest remaining opportunity in canonical file ranking for harder prompts
+- the system retrieves at least one relevant source for most benchmark cases
+- the first-ranked source is relevant in most cases, meeting the current internal 80% top-1 target
 - the benchmark includes architecture, API, setup, docs, tests, cross-file, and conversation-style questions
-- the evaluation provides a solid engineering benchmark for the current system and repo scope
+- RAGAS is treated as a secondary judge signal; deterministic retrieval and grounded checklist metrics are the primary gates
 
 Benchmark strengths:
 - strong retrieval on architecture and setup questions
@@ -341,8 +343,9 @@ Benchmark strengths:
 - measurable end-to-end performance instead of anecdotal examples
 
 Benchmark-exposed weaknesses:
-- duplicate source retrieval still appears in some cases
-- some cross-file and test-heavy questions remain harder than single-file API questions
+- the sample set is focused on one target project, so it should be broadened before being presented as general benchmark evidence
+- duplicate source retrieval and noisy context selection can lower RAGAS context precision
+- some cross-file, specific-function, and test-heavy questions remain harder than single-file API questions
 - canonical implementation files are not always ranked first on the hardest prompts
 
 ## Project Strengths

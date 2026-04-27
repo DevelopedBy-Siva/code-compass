@@ -353,7 +353,15 @@ class CodebaseRAGSystem:
 
             normalized_history = self._normalize_history(history or [])
             question_intent = self._question_intent(question)
-            search_depth = top_k * 4 if question_intent in {"api", "implementation", "cross_file", "setup"} else top_k * 2
+            deep_search_intents = {
+                "api",
+                "implementation",
+                "cross_file",
+                "error_handling",
+                "setup",
+                "tests",
+            }
+            search_depth = top_k * 4 if question_intent in deep_search_intents else top_k * 2
             retrieval_query = self._build_retrieval_query(question, normalized_history)
             query_embedding = self.embedder.embed_text(retrieval_query)
             semantic_hits = []
@@ -369,7 +377,7 @@ class CodebaseRAGSystem:
             )
             semantic_hits = self.hybrid_search.normalize_semantic_results(semantic_hits)
             fused = self.hybrid_search.reciprocal_rank_fusion(lexical_hits, semantic_hits, top_k=search_depth)
-            rerank_query = retrieval_query if question_intent in {"api", "implementation", "cross_file", "setup"} else question
+            rerank_query = retrieval_query if question_intent in deep_search_intents else question
             reranked = self.hybrid_search.rerank(rerank_query, fused, top_k=search_depth)
             reranked = self._prioritize_results(question, retrieval_query, reranked, top_k=top_k)
             reranked = self._select_answer_sources(question, reranked, top_k=top_k)
@@ -809,7 +817,7 @@ Do not leave the answer unfinished.
                 ]
             )
         if not history:
-            return normalized
+            return self._expand_query_for_intent(normalized)
 
         recent_user = [
             turn["content"].strip()
@@ -911,14 +919,6 @@ Do not leave the answer unfinished.
             if len(selected) == top_k:
                 break
 
-        if len(selected) < top_k:
-            for item in results:
-                if item in selected:
-                    continue
-                selected.append(item)
-                if len(selected) == top_k:
-                    break
-
         return selected
 
     @staticmethod
@@ -955,6 +955,8 @@ Do not leave the answer unfinished.
             return "general"
         if CodebaseRAGSystem._is_repo_overview_question(normalized):
             return "overview"
+        if any(token in normalized for token in {"test", "tests", "pytest", "spec"}):
+            return "tests"
         if any(token in normalized for token in {"error", "invalid", "conflict", "raises", "guard against"}):
             return "error_handling"
         if any(token in normalized for token in {"how are", "how does", "flow", "across files", "code path"}):
@@ -973,53 +975,33 @@ Do not leave the answer unfinished.
         normalized = " ".join((question or "").split())
         lowered = normalized.lower()
         hints = []
+        code_terms = self._query_code_terms(normalized)
 
         if any(token in lowered for token in {"export", "expose", "import"}):
-            hints.extend(["package exports", "__init__.py", "public api", "re-export"])
-        if "how is select exposed to users in sqlmodel" in lowered:
-            hints.extend(
-                [
-                    "sqlmodel/__init__.py",
-                    "sqlmodel/sql/expression.py",
-                    "select re-export",
-                    "top-level select import",
-                ]
-            )
-        if "select" in lowered:
-            hints.extend(
-                [
-                    "select",
-                    "expression",
-                    "query builder",
-                    "public api",
-                    "sqlmodel/sql/expression.py",
-                    "sqlmodel/__init__.py",
-                    "re-export",
-                    "top-level import",
-                ]
-            )
+            hints.extend(["package exports", "__init__.py", "index", "public api", "re-export"])
+        if any(token in lowered for token in {"public api", "exposed", "exported"}):
+            hints.extend(["public api", "__init__.py", "index"])
         if "session.exec" in lowered or ("session" in lowered and "exec" in lowered):
-            hints.extend(["session exec", "orm/session.py", "asyncio/session.py"])
-        if "relationship" in lowered:
-            hints.extend(["relationship", "Relationship", "main.py"])
-        if "field" in lowered:
-            hints.extend(["Field", "FieldInfo", "main.py"])
-        if "create_engine" in lowered:
-            hints.extend(["create_engine", "__init__.py", "re-export"])
-        if "create_all" in lowered or "metadata" in lowered:
-            hints.extend(
-                [
-                    "metadata create_all",
-                    "table creation",
-                    "engine",
-                    "SQLModel.metadata",
-                    "README.md",
-                    "sqlmodel/main.py",
-                    "docs_src",
-                ]
-            )
+            hints.extend(["session exec", "session.py", "execute", "scalars"])
+        if "async" in lowered:
+            hints.extend(["async", "await", "asyncio"])
+        if any(token in lowered for token in {"relationship", "field", "function", "method", "class"}):
+            hints.extend(["class", "function", "method", "metadata"])
+        if any(token in lowered for token in {"under the hood", "implementation", "code path", "conversion"}):
+            hints.extend(["implementation", "source", "call path", "class", "function"])
+        if any(token in lowered for token in {"error", "invalid", "conflict", "raise", "raises", "guard"}):
+            hints.extend(["raise", "raises", "exception", "validation", "guard"])
+        if any(token in lowered for token in {"test", "tests", "pytest", "spec"}):
+            hints.extend(["test", "tests", "pytest", "spec"])
+        if any(token in lowered for token in {"create", "setup", "install", "configuration", "metadata", "table"}):
+            hints.extend(["create", "setup", "configure", "initialize", "schema", "README.md", "docs"])
         if "__init__" in lowered or "exports" in lowered:
-            hints.extend(["sqlmodel/__init__.py", "package exports", "public api"])
+            hints.extend(["__init__.py", "package exports", "public api"])
+
+        for term in sorted(code_terms):
+            parts = [part for part in re.split(r"[._/-]+", term) if len(part) > 2]
+            if len(parts) > 1:
+                hints.append(" ".join(parts))
 
         if not hints:
             return normalized
@@ -1069,57 +1051,156 @@ Do not leave the answer unfinished.
 
     def _canonical_path_priority(self, item: dict, question: str) -> int:
         file_path = (item.get("file_path") or "").lower()
-        normalized = " ".join((question or "").lower().split())
+        source_text = " ".join(
+            [
+                file_path,
+                str(item.get("symbol_name") or "").lower(),
+                str(item.get("signature") or "").lower(),
+            ]
+        )
+        basename = file_path.rsplit("/", 1)[-1]
+        stem = basename.rsplit(".", 1)[0]
+        symbol_name = str(item.get("symbol_name") or "").lower()
+        signature = str(item.get("signature") or "").lower()
+        intent = self._question_intent(question)
+        code_terms = self._query_code_terms(question)
+        path_fragments = self._query_path_fragments(question)
         score = 0
 
-        if file_path == "sqlmodel/__init__.py":
-            score += 4 if any(token in normalized for token in {"export", "expose", "import", "create_engine", "select"}) else 0
-        if file_path == "sqlmodel/sql/expression.py":
-            score += 5 if "select" in normalized else 0
-        if file_path == "sqlmodel/sql/_expression_select_gen.py":
-            score += 2 if "select" in normalized else 0
-        if file_path == "sqlmodel/sql/_expression_select_cls.py":
-            score += 2 if "select" in normalized else 0
-        if file_path == "readme.md":
-            score += 4 if any(token in normalized for token in {"metadata", "create_all", "workflow", "readme"}) else 0
-        if file_path.startswith("docs_src/"):
-            score += 3 if any(token in normalized for token in {"metadata", "create_all", "table", "workflow"}) else 0
-        if file_path == "sqlmodel/main.py":
-            score += 3 if any(token in normalized for token in {"field", "relationship", "metadata", "table", "sqlmodel"}) else 0
+        for fragment in path_fragments:
+            if file_path == fragment or file_path.endswith(f"/{fragment}") or fragment in file_path:
+                score += 8
 
-        if "__init__.py" in file_path:
-            score += 2 if any(token in normalized for token in {"export", "expose", "import", "public api"}) else 0
-        if any(token in normalized for token in {"select", "expression"}):
-            if "expression" in file_path or "_expression_select" in file_path:
+        matched_terms = {term for term in code_terms if term in source_text}
+        score += min(len(matched_terms), 6)
+
+        for term in code_terms:
+            if term == basename or term == stem:
+                score += 4
+            elif term in basename:
                 score += 3
-        if normalized == "how is select exposed to users in sqlmodel?":
-            if file_path == "sqlmodel/__init__.py":
-                score += 6
-            if file_path == "sqlmodel/sql/expression.py":
-                score += 6
-        if "session" in normalized:
-            if file_path.endswith("session.py") or "/session.py" in file_path:
+            if term and term in symbol_name:
                 score += 3
-        if "relationship" in normalized and file_path.endswith("main.py"):
-            score += 2
-        if "field" in normalized and file_path.endswith("main.py"):
-            score += 2
-        if any(token in normalized for token in {"create_engine", "export", "expose"}) and "__init__.py" in file_path:
-            score += 2
-        if any(token in normalized for token in {"metadata", "create_all", "table"}) and (
-            "docs_src/" in file_path or file_path.endswith("main.py") or file_path == "readme.md"
-        ):
-            score += 2
-        if self._is_doc_source(item) and self._question_intent(question) in {
+            if term and term in file_path:
+                score += 2
+            if term and term in signature:
+                score += 1
+
+        if intent == "api":
+            if basename == "__init__.py" or stem in {"index", "public", "api"}:
+                score += 4
+            if any(token in file_path for token in {"api", "route", "router", "controller"}):
+                score += 2
+        if intent in {"implementation", "cross_file"}:
+            if not self._is_doc_source(item):
+                score += 2
+            if item.get("symbol_type") != "fallback_chunk":
+                score += 1
+        if intent == "tests":
+            if (
+                file_path.startswith("tests/")
+                or "/tests/" in file_path
+                or basename.startswith("test_")
+                or basename.endswith("_test.py")
+                or basename.endswith(".test.js")
+                or basename.endswith(".spec.js")
+                or basename.endswith(".test.ts")
+                or basename.endswith(".spec.ts")
+            ):
+                score += 5
+        if intent == "error_handling":
+            if any(token in source_text for token in {"raise", "except", "error", "invalid", "exception"}):
+                score += 3
+            if "test" in file_path:
+                score += 1
+        if intent == "setup":
+            setup_files = {
+                "readme.md",
+                "package.json",
+                "pyproject.toml",
+                "requirements.txt",
+                "dockerfile",
+                "docker-compose.yml",
+                "compose.yml",
+            }
+            if basename in setup_files or any(token in file_path for token in {"config", "settings", "setup"}):
+                score += 3
+            if any(token in source_text for token in {"create", "configure", "initialize", "metadata", "schema"}):
+                score += 1
+        if intent in {"docs", "overview"} and self._is_doc_source(item):
+            score += self._doc_priority(item) + 1
+        if self._is_doc_source(item) and intent in {
             "api",
             "implementation",
             "cross_file",
             "error_handling",
-            "setup",
+            "tests",
         }:
             score -= 1
 
         return score
+
+    @staticmethod
+    def _query_code_terms(text: str) -> set:
+        stopwords = {
+            "about",
+            "against",
+            "also",
+            "and",
+            "are",
+            "between",
+            "code",
+            "does",
+            "file",
+            "for",
+            "from",
+            "happen",
+            "happens",
+            "how",
+            "into",
+            "main",
+            "me",
+            "model",
+            "models",
+            "path",
+            "project",
+            "that",
+            "the",
+            "this",
+            "through",
+            "under",
+            "using",
+            "what",
+            "when",
+            "where",
+            "which",
+            "with",
+        }
+        raw_terms = re.findall(
+            r"[A-Za-z_][A-Za-z0-9_]*(?:[./-][A-Za-z_][A-Za-z0-9_]*)*",
+            text or "",
+        )
+        terms = set()
+        for raw_term in raw_terms:
+            expanded = {raw_term}
+            expanded.update(re.split(r"[._/-]+", raw_term))
+            expanded.update(re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", raw_term).split())
+
+            for term in expanded:
+                normalized = term.strip("_./-").lower()
+                if len(normalized) < 3 or normalized in stopwords:
+                    continue
+                terms.add(normalized)
+        return terms
+
+    @staticmethod
+    def _query_path_fragments(text: str) -> set:
+        fragments = set()
+        for fragment in re.findall(r"[A-Za-z0-9_./-]+(?:\.[A-Za-z0-9_./-]+|/[A-Za-z0-9_./-]+)", text or ""):
+            normalized = fragment.strip().strip("./").lower()
+            if "/" in normalized or "." in normalized:
+                fragments.add(normalized)
+        return fragments
 
     @staticmethod
     def _is_substantive_assistant_message(content: str) -> bool:

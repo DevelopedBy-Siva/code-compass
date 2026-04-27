@@ -186,7 +186,19 @@ STOPWORDS = {
 
 
 def tokenize_text(text: str):
-    return re.findall(r"[a-z0-9_./+-]+", (text or "").lower())
+    tokens = []
+    for raw_token in re.findall(r"[A-Za-z0-9_./+-]+", text or ""):
+        token = raw_token.lower()
+        tokens.append(token)
+
+        camel_parts = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", raw_token).split()
+        split_parts = re.split(r"[._/+-]+", token)
+        for part in [*camel_parts, *split_parts]:
+            normalized = part.strip().lower()
+            if normalized and normalized != token:
+                tokens.append(normalized)
+
+    return tokens
 
 
 def normalize_keywords(keywords):
@@ -504,6 +516,36 @@ def build_headline_metrics(custom_metrics, audit):
     }
 
 
+def build_metric_guidance(custom_metrics, ragas_report):
+    retrieval_gate_thresholds = {
+        "retrieval_hit_rate": 0.8,
+        "top1_hit_rate": 0.8,
+        "mrr": 0.75,
+    }
+    retrieval_gate_pass = all(
+        custom_metrics[key] >= threshold
+        for key, threshold in retrieval_gate_thresholds.items()
+    )
+
+    next_focus = []
+    if custom_metrics["source_recall"] < 0.7:
+        next_focus.append("Improve multi-source recall for cross-file and implementation questions.")
+    if custom_metrics["duplicate_source_rate"] > 0.15:
+        next_focus.append("Reduce duplicate or near-duplicate source chunks before answer generation.")
+    if custom_metrics["grounded_answer_rate"] < 0.75:
+        next_focus.append("Tighten answer grounding and checklist coverage before presenting this as a broad benchmark.")
+    if ragas_report and ragas_report.get("context_precision", 1.0) < 0.7:
+        next_focus.append("Treat low RAGAS context precision as a context-selection signal, not as the primary pass/fail gate.")
+
+    return {
+        "primary_gate": "pass" if retrieval_gate_pass else "needs_work",
+        "primary_gate_basis": "deterministic_retrieval",
+        "primary_gate_thresholds": retrieval_gate_thresholds,
+        "ragas_role": "supporting_signal_not_primary_gate",
+        "next_focus": next_focus,
+    }
+
+
 def build_resume_summary(custom_metrics, audit, ragas_report, ragas_error):
     lines = [
         (
@@ -812,6 +854,7 @@ def run():
     category_breakdown = summarize_by_category(details)
     ragas_report, ragas_error = run_ragas(rows, outputs)
     headline_metrics = build_headline_metrics(custom_metrics, audit)
+    metric_guidance = build_metric_guidance(custom_metrics, ragas_report)
     resume_summary = build_resume_summary(custom_metrics, audit, ragas_report, ragas_error)
     readiness = benchmark_readiness(audit, ragas_error)
 
@@ -836,6 +879,7 @@ def run():
         "eval_set_audit": audit,
         "headline_metrics": headline_metrics,
         "benchmark_readiness": readiness,
+        "metric_guidance": metric_guidance,
         "ragas": ragas_report,
         "ragas_error": ragas_error,
         "custom_metrics": custom_metrics,
