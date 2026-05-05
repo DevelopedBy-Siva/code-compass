@@ -174,7 +174,8 @@ class RepoFetcher:
         for file_path in root.rglob("*"):
             if not file_path.is_file():
                 continue
-            if any(part in IGNORED_DIRS for part in file_path.parts):
+            relative_parts = file_path.relative_to(root).parts
+            if any(part in IGNORED_DIRS for part in relative_parts):
                 continue
             if file_path.name in IGNORED_FILENAMES:
                 continue
