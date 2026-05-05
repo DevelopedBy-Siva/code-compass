@@ -1,11 +1,9 @@
-import math
 import re
 from collections import defaultdict
 from typing import List
 
 from rank_bm25 import BM25Okapi
 from sentence_transformers import CrossEncoder
-
 
 TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_./:-]*")
 
@@ -27,7 +25,6 @@ class HybridSearchEngine:
     def bm25_search(self, chunks: List[dict], query: str, top_k: int = 12) -> List[dict]:
         if not chunks:
             return []
-
         tokens = tokenize(query)
         if not tokens:
             return []
@@ -73,6 +70,11 @@ class HybridSearchEngine:
         return merged[:top_k]
 
     def rerank(self, query: str, candidates: List[dict], top_k: int = 6) -> List[dict]:
+        """
+        FIX: top_k now defaults to 6 and callers should pass a small final number (4-6),
+        NOT search_depth (which was up to 120). Reranking 120 items then dumping them
+        all into the LLM context was the main faithfulness killer.
+        """
         if not candidates:
             return []
 

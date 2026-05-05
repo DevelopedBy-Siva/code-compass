@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field, HttpUrl
 from dotenv import load_dotenv
 
 from src.bedrock_claude import BedrockTransientError, is_bedrock_retryable_error
+from src.qdrant_keepalive import QdrantKeepAliveScheduler
 from src.rag_system import CodebaseRAGSystem
 
 load_dotenv(Path(__file__).with_name(".env"))
@@ -34,6 +35,7 @@ app.add_middleware(
 )
 
 rag_system: Optional[CodebaseRAGSystem] = None
+qdrant_keepalive: Optional[QdrantKeepAliveScheduler] = None
 
 
 class RepoIndexRequest(BaseModel):
@@ -60,9 +62,17 @@ def require_session_id(x_session_id: Optional[str] = Header(None, alias="X-Sessi
 
 @app.on_event("startup")
 def startup():
-    global rag_system
+    global qdrant_keepalive, rag_system
     Path("./data").mkdir(exist_ok=True)
     rag_system = CodebaseRAGSystem()
+    qdrant_keepalive = QdrantKeepAliveScheduler(rag_system.vector_store)
+    qdrant_keepalive.start()
+
+
+@app.on_event("shutdown")
+def shutdown():
+    if qdrant_keepalive is not None:
+        qdrant_keepalive.stop()
 
 
 @app.get("/")

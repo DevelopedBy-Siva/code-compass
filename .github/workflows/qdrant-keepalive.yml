@@ -1,0 +1,35 @@
+name: Qdrant Keepalive
+
+on:
+  schedule:
+    - cron: "17 */12 * * *"
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Qdrant collection
+        env:
+          QDRANT_URL: ${{ secrets.QDRANT_URL }}
+          QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
+          QDRANT_COLLECTION: ${{ vars.QDRANT_COLLECTION }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${QDRANT_URL:-}" ]; then
+            echo "QDRANT_URL secret is not configured; skipping Qdrant keepalive."
+            exit 0
+          fi
+
+          if [ -z "${QDRANT_API_KEY:-}" ]; then
+            echo "QDRANT_API_KEY secret is not configured; skipping Qdrant keepalive."
+            exit 0
+          fi
+
+          base_url="${QDRANT_URL%/}"
+          collection="${QDRANT_COLLECTION:-repo_qa_chunks}"
+
+          curl --fail --silent --show-error \
+            -H "api-key: ${QDRANT_API_KEY}" \
+            "${base_url}/collections/${collection}"

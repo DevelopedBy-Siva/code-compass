@@ -11,18 +11,18 @@ class QdrantVectorStore:
         self.embedding_dim = embedding_dim
         self.collection_name = os.getenv("QDRANT_COLLECTION", "repo_qa_chunks")
         self.upsert_batch_size = max(1, int(os.getenv("QDRANT_UPSERT_BATCH_SIZE", "64")))
+        self.qdrant_url = self._clean_env("QDRANT_URL")
+        self.qdrant_api_key = self._clean_env("QDRANT_API_KEY")
+        self.timeout = int(os.getenv("QDRANT_TIMEOUT_SECONDS", "120"))
         self.client = self._create_client()
         self._ensure_collection()
 
     def _create_client(self):
-        url = self._clean_env("QDRANT_URL")
-        api_key = self._clean_env("QDRANT_API_KEY")
-        timeout = int(os.getenv("QDRANT_TIMEOUT_SECONDS", "120"))
-        if url:
+        if self.qdrant_url:
             return QdrantClient(
-                url=url,
-                api_key=api_key,
-                timeout=timeout,
+                url=self.qdrant_url,
+                api_key=self.qdrant_api_key,
+                timeout=self.timeout,
                 check_compatibility=False,
             )
         return QdrantClient(":memory:")
@@ -148,6 +148,16 @@ class QdrantVectorStore:
 
     def load(self):
         self._ensure_collection()
+
+    def is_remote(self) -> bool:
+        return self.qdrant_url is not None
+
+    def keep_alive(self) -> dict:
+        info = self.client.get_collection(self.collection_name)
+        return {
+            "total_vectors": info.points_count or 0,
+            "collection_name": self.collection_name,
+        }
 
     def get_stats(self) -> dict:
         info = self.client.get_collection(self.collection_name)

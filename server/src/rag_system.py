@@ -333,7 +333,7 @@ class CodebaseRAGSystem:
         session_key: str,
         question: str,
         top_k: int = 8,
-        history: Optional[List[object]] = None,
+        history=None,
     ) -> dict:
         session = get_db_session(self.database_url)
         try:
@@ -369,8 +369,10 @@ class CodebaseRAGSystem:
                 else top_k * shallow_multiplier
             )
             search_depth = max(top_k, min(search_depth, 120))
+
             retrieval_query = self._build_retrieval_query(question, normalized_history)
             query_embedding = self.embedder.embed_text(retrieval_query)
+
             semantic_hits = []
             for score, meta in self.vector_store.search(query_embedding, k=search_depth, repo_filter=repo_id):
                 serialized = dict(meta)
@@ -384,6 +386,7 @@ class CodebaseRAGSystem:
             )
             semantic_hits = self.hybrid_search.normalize_semantic_results(semantic_hits)
             fused = self.hybrid_search.reciprocal_rank_fusion(lexical_hits, semantic_hits, top_k=search_depth)
+
             path_hits = self._path_intent_search(
                 self.repo_chunks[repo_id],
                 question,
@@ -391,13 +394,25 @@ class CodebaseRAGSystem:
                 top_k=search_depth,
             )
             fused = self._merge_ranked_candidates(fused, path_hits, top_k=search_depth)
+
             rerank_query = retrieval_query if question_intent in deep_search_intents else question
-            reranked = self.hybrid_search.rerank(rerank_query, fused, top_k=search_depth)
+
+            # FIX: rerank to a small candidate pool first (20), then let
+            # _prioritize_results and _select_answer_sources trim to final top_k.
+            # Previously rerank was called with search_depth (up to 120), meaning
+            # the LLM received far too many chunks and faithfulness dropped.
+            rerank_pool = min(search_depth, 20)
+            reranked = self.hybrid_search.rerank(rerank_query, fused, top_k=rerank_pool)
+
             reranked = self._prioritize_results(question, retrieval_query, reranked, top_k=top_k)
-            reranked = self._select_answer_sources(question, reranked, top_k=top_k)
+
+            # FIX: cap final sources at 5 instead of top_k (8).
+            # 5 sources × 1500 chars = ~7500 chars context, which the LLM handles well.
+            # 8 sources × 2500 chars = ~20000 chars, which causes lost-in-the-middle issues.
+            final_top_k = min(top_k, 5)
+            reranked = self._select_answer_sources(question, reranked, top_k=final_top_k)
 
             answer = self._generate_answer(repo, question, reranked, normalized_history)
-
             return answer
         finally:
             session.close()
@@ -411,12 +426,13 @@ class CodebaseRAGSystem:
         finally:
             session.close()
 
+
     def _generate_answer(
         self,
-        repo: Repository,
+        repo,
         question: str,
-        sources: List[dict],
-        history: Optional[List[dict]] = None,
+        sources: list,
+        history=None,
     ) -> dict:
         if not sources:
             return {
@@ -428,7 +444,10 @@ class CodebaseRAGSystem:
 
         context_blocks = []
         slim_sources = []
+
         for index, source in enumerate(sources, start=1):
+            content_preview = source["content"][:1500]
+
             context_blocks.append(
                 "\n".join(
                     [
@@ -436,7 +455,7 @@ class CodebaseRAGSystem:
                         f"File: {source['file_path']}",
                         f"Symbol: {source['symbol_name']}",
                         f"Lines: {source['line_start']}-{source['line_end']}",
-                        source["content"][:2500],
+                        content_preview,
                     ]
                 )
             )
@@ -495,17 +514,23 @@ Rules:
 """
 
         joined_context = "\n\n".join(context_blocks)
+
+        # FIX: context is placed BEFORE the question (prompt ordering fix).
         user_prompt = f"""
 Repository: {repo.owner}/{repo.name}
-Question: {question}
+
+Context from the codebase:
+{joined_context}
+
 Recent conversation:
 {self._format_history(history or [])}
 
-Context:
-{joined_context}
+Now answer this question using only the context above:
+{question}
 """
 
         answer_text, finish_reason = self._generate_markdown_response(system_prompt, user_prompt)
+
         if self._looks_incomplete(answer_text, finish_reason):
             repair_prompt = f"""
 The draft answer below appears to be cut off or incomplete.
@@ -519,7 +544,7 @@ Draft answer:
                 f"{user_prompt.strip()}\n\n{repair_prompt.strip()}",
             )
             if self._looks_incomplete(answer_text, finish_reason):
-                short_prompt = f"""
+                short_prompt = """
 Answer the question again, but keep it concise and complete.
 Use 2 short paragraphs or 4-6 bullets max.
 Do not leave the answer unfinished.
@@ -528,6 +553,7 @@ Do not leave the answer unfinished.
                     system_prompt,
                     f"{user_prompt.strip()}\n\n{short_prompt.strip()}",
                 )
+
         answer_text = self._finalize_answer(answer_text)
         confidence = self._estimate_confidence(sources)
         summary = " ".join(answer_text.split())[:160] if answer_text else ""

@@ -10,14 +10,14 @@ This project includes:
 
 ## Why This Project Matters
 
-Strong applied AI projects usually show:
+This project is written to show the parts recruiters and engineering reviewers usually look for in a personal AI project:
 - clear system design
-- practical backend and frontend integration
-- retrieval and ranking logic beyond a single prompt
+- practical frontend, backend, and deployment integration
+- retrieval and ranking logic beyond a single LLM prompt
 - measurable evaluation instead of anecdotal demos
 - thoughtful tradeoffs around cost, latency, and persistence
 
-Code Compass brings those elements together in one end-to-end application.
+Code Compass brings those elements together in one end-to-end application with visible architecture, source citations, and an evaluation harness ready for benchmark results.
 
 ## What The System Does
 
@@ -215,9 +215,9 @@ Pure semantic search misses exact symbols and file names. Pure lexical search mi
 
 ### Local Development
 
-Local development is now designed around Amazon Bedrock:
-- Bedrock Claude Sonnet 4 for answer generation
-- Bedrock Cohere Embed v4 for semantic retrieval
+Local development is configured for higher-quality experimentation:
+- Claude Sonnet 4 on Amazon Bedrock for answer generation
+- Cohere Embed v4 on Amazon Bedrock for semantic retrieval
 
 This setup is useful for:
 - higher quality local experiments
@@ -247,9 +247,10 @@ The production deployment target is:
 - frontend on Vercel
 - backend on Hugging Face Spaces
 
-Production inference is configured differently from local/eval:
+Production inference is configured differently from local development:
 - Groq-hosted Llama for answer generation
 - lightweight local sentence-transformer embeddings for semantic retrieval
+- Qdrant Cloud for vector storage
 
 This production setup was chosen to fit Hugging Face Spaces free-tier constraints more comfortably while keeping the retrieval and answer pipeline intact.
 
@@ -257,6 +258,17 @@ Recommended production runtime:
 - `LLM_PROVIDER=groq`
 - `EMBEDDING_PROVIDER=local`
 - `LIGHTWEIGHT_LOCAL_EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2`
+- `QDRANT_URL=<your-qdrant-cloud-url>`
+- `QDRANT_API_KEY=<your-qdrant-api-key>`
+
+When `QDRANT_URL` is configured, the backend starts a lightweight Qdrant keepalive scheduler. It calls the configured collection every 12 hours by default, which keeps free-tier Qdrant clusters from being treated as inactive while the backend process is running.
+
+Optional Qdrant keepalive settings:
+- `QDRANT_KEEPALIVE_ENABLED=true`
+- `QDRANT_KEEPALIVE_INTERVAL_SECONDS=43200`
+- `QDRANT_KEEPALIVE_RUN_ON_START=true`
+
+The repository also includes a GitHub Actions Qdrant keepalive workflow at `.github/workflows/qdrant-keepalive.yml`. Add repository secrets named `QDRANT_URL` and `QDRANT_API_KEY`; optionally add a repository variable named `QDRANT_COLLECTION` if you do not use the default `repo_qa_chunks` collection. The workflow runs every 12 hours and can also be triggered manually.
 
 ## Deployment
 
@@ -308,7 +320,7 @@ The benchmark currently measures:
 
 The current RAGAS judge configuration uses Bedrock Claude Opus 4 via `EVAL_MODEL`.
 
-The project includes a measurable end-to-end evaluation workflow alongside the product itself.
+The project includes a measurable end-to-end evaluation workflow alongside the product itself. Metric values are intentionally left pending until the benchmark is rerun, so the README does not claim unverified results.
 
 ### Benchmark Snapshot
 
@@ -321,16 +333,16 @@ Current sample benchmark target:
 
 | Metric | Result |
 | --- | ---: |
-| Retrieval hit rate | Pending rerun |
-| Top-1 hit rate | Pending rerun |
-| Mean reciprocal rank | Pending rerun |
-| Source recall | Pending rerun |
-| Grounded answer rate | Pending rerun |
-| Keyword/checklist pass rate | Pending rerun |
-| Reference-support pass rate | Pending rerun |
-| Faithfulness (RAGAS, supporting) | Pending rerun |
-| Answer relevancy (RAGAS, supporting) | Pending rerun |
-| Context precision (RAGAS, supporting) | Pending rerun |
+| Retrieval hit rate | To be added after rerun |
+| Top-1 hit rate | To be added after rerun |
+| Mean reciprocal rank | To be added after rerun |
+| Source recall | To be added after rerun |
+| Grounded answer rate | To be added after rerun |
+| Keyword/checklist pass rate | To be added after rerun |
+| Reference-support pass rate | To be added after rerun |
+| Faithfulness (RAGAS, supporting) | To be added after rerun |
+| Answer relevancy (RAGAS, supporting) | To be added after rerun |
+| Context precision (RAGAS, supporting) | To be added after rerun |
 
 What these numbers mean:
 - the system should retrieve at least one relevant source for most benchmark cases
