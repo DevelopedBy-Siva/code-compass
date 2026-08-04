@@ -19,7 +19,7 @@ from src.database import get_db_session, DocumentVersion, DocumentChunk
 client = OpenAI(
     api_key=os.getenv("GROQ_API_KEY"), base_url="https://api.groq.com/openai/v1"
 )
-
+CLIENT_URL=os.getenv("APP_URL")
 
 app = FastAPI(
     title="Incremental RAG API",
@@ -30,7 +30,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "https://document-qa-rag-system.vercel.app/",
+       CLIENT_URL,
     ],
     allow_credentials=True,
     allow_methods=["*"],
