@@ -380,7 +380,7 @@ class EmbeddingGenerator:
         if explicit_model:
             return explicit_model
         if self.provider == "bedrock":
-            return os.getenv("BEDROCK_EMBEDDING_MODEL", "cohere.embed-v4:0")
+            return os.getenv("BEDROCK_EMBEDDING_MODEL", "cohere.embed-v3:0")
         if self.provider == "vertex_ai":
             return os.getenv("VERTEX_EMBEDDING_MODEL", "gemini-embedding-001")
         if self._is_hf_space() or self._is_test_context():

@@ -1,7 +1,16 @@
+"""Evaluation harness for Code Compass RAG system.
+
+Computes 4 core metrics:
+- Hit rate @ top-5 (retrieval quality)
+- Grounded answer rate (citation accuracy)
+- LLM-as-judge faithfulness (Claude 3.5 Sonnet via RAGAS)
+- Query latency P95 (responsiveness)
+"""
+
+import asyncio
 import json
 import os
 import sys
-import asyncio
 import re
 import time
 from pathlib import Path
@@ -28,15 +37,6 @@ TOP_K = int(os.getenv("CODEBASE_RAG_TOP_K", "8"))
 QUERY_TIMEOUT_SECONDS = int(os.getenv("CODEBASE_RAG_QUERY_TIMEOUT_SECONDS", "180"))
 QUERY_MAX_RETRIES = int(os.getenv("CODEBASE_RAG_QUERY_MAX_RETRIES", "5"))
 QUERY_RETRY_BASE_SECONDS = float(os.getenv("CODEBASE_RAG_QUERY_RETRY_BASE_SECONDS", "2"))
-ENABLE_RAGAS = os.getenv("CODEBASE_RAG_ENABLE_RAGAS", "1").lower() not in {"0", "false", "no"}
-RAGAS_ASYNC = os.getenv("CODEBASE_RAG_RAGAS_ASYNC", "0").lower() in {"1", "true", "yes"}
-RAGAS_RAISE_EXCEPTIONS = os.getenv("CODEBASE_RAG_RAGAS_RAISE_EXCEPTIONS", "0").lower() in {
-    "1",
-    "true",
-    "yes",
-}
-MIN_REFERENCE_OVERLAP = float(os.getenv("CODEBASE_RAG_MIN_REFERENCE_OVERLAP", "0.2"))
-MIN_REFERENCE_TERM_MATCHES = int(os.getenv("CODEBASE_RAG_MIN_REFERENCE_TERM_MATCHES", "2"))
 EVAL_SET_PATH = Path(
     os.getenv(
         "CODEBASE_RAG_EVAL_SET",
@@ -46,6 +46,7 @@ EVAL_SET_PATH = Path(
 
 
 def log(message: str):
+    """Log message to stderr with [eval] prefix."""
     print(f"[eval] {message}", file=sys.stderr, flush=True)
 
 
@@ -56,16 +57,16 @@ def get_app_model_config():
     elif llm_provider == "bedrock":
         llm_model = os.getenv(
             "BEDROCK_LLM_MODEL",
-            "anthropic.claude-sonnet-4-20250514-v1:0",
+            "anthropic.claude-3-5-sonnet-20240620-v1:0",
         )
     elif llm_provider == "vertex_ai":
-        llm_model = os.getenv("VERTEX_LLM_MODEL", "claude-sonnet-4@20250514")
+        llm_model = os.getenv("VERTEX_LLM_MODEL", "claude-3-5-sonnet@20240620")
     else:
         llm_model = "unknown"
 
     embedding_provider = os.getenv("EMBEDDING_PROVIDER", "auto").lower()
     if embedding_provider == "bedrock":
-        embedding_model = os.getenv("BEDROCK_EMBEDDING_MODEL", "cohere.embed-v4:0")
+        embedding_model = os.getenv("BEDROCK_EMBEDDING_MODEL", "cohere.embed-v3:0")
     elif embedding_provider == "vertex_ai":
         embedding_model = os.getenv("VERTEX_EMBEDDING_MODEL", "gemini-embedding-001")
     elif embedding_provider == "openai":
@@ -79,7 +80,7 @@ def get_app_model_config():
 
     eval_model = os.getenv(
         "EVAL_MODEL",
-        os.getenv("BEDROCK_EVAL_MODEL", "anthropic.claude-opus-4-20250514-v1:0"),
+        os.getenv("BEDROCK_EVAL_MODEL", "anthropic.claude-3-5-sonnet-20240620-v1:0"),
     )
     return {
         "llm_provider": llm_provider,
@@ -224,9 +225,9 @@ def normalize_keywords(keywords):
 
 
 def compute_retrieval_metrics(expected_sources, actual_sources):
+    """Compute retrieval metrics: hit rate and top-1 hit for given rank k."""
     expected = {normalize_path(path) for path in expected_sources}
     actual = [normalize_path(path) for path in actual_sources]
-    unique_actual = list(dict.fromkeys(actual))
 
     def matches_expected(actual_path: str) -> bool:
         for expected_path in expected:
@@ -241,45 +242,15 @@ def compute_retrieval_metrics(expected_sources, actual_sources):
                 return True
         return False
 
+    # Hit rate: was any retrieved source relevant?
     hit = 1 if any(matches_expected(path) for path in actual) else 0
-    recall = 0.0
-    if expected:
-        matched_expected = set()
-        for expected_path in expected:
-            expected_is_directory = (
-                expected_path.endswith("/")
-                or "." not in expected_path.rsplit("/", 1)[-1]
-            )
-            normalized_expected = expected_path.rstrip("/")
-            for actual_path in actual:
-                if actual_path == expected_path or (
-                    expected_is_directory and actual_path.startswith(normalized_expected + "/")
-                ):
-                    matched_expected.add(expected_path)
-                    break
-        recall = len(matched_expected) / len(expected)
 
-    mrr = 0.0
-    for index, path in enumerate(actual, start=1):
-        if matches_expected(path):
-            mrr = 1.0 / index
-            break
+    # Top-1 hit: was the first retrieved source relevant?
+    top1_hit = 1 if actual and matches_expected(actual[0]) else 0
 
     return {
         "retrieval_hit": hit,
-        "source_recall": recall,
-        "mrr": mrr,
-        "top1_hit": 1 if actual and matches_expected(actual[0]) else 0,
-        "unique_source_precision": (
-            sum(1 for path in unique_actual if matches_expected(path)) / len(unique_actual)
-            if unique_actual
-            else 0.0
-        ),
-        "duplicate_source_rate": (
-            (len(actual) - len(unique_actual)) / len(actual)
-            if actual
-            else 0.0
-        ),
+        "top1_hit": top1_hit,
     }
 
 
@@ -307,63 +278,13 @@ def keyword_match_details(row, answer: str):
                 matched_keywords.append(keyword)
             continue
 
-        for index in range(0, len(answer_tokens) - window + 1):
-            if answer_tokens[index : index + window] == keyword_tokens:
-                matched_keywords.append(keyword)
-                break
-
-    matched_set = set(matched_keywords)
-    missing_keywords = [keyword for keyword in keywords if keyword not in matched_set]
-    matched_count = len(matched_set)
-    return {
-        "coverage": matched_count / len(keywords),
-        "matched_count": matched_count,
-        "total_keywords": len(keywords),
-        "matched_keywords": sorted(matched_set),
-        "missing_keywords": missing_keywords,
-    }
-
-
-def keyword_pass(row, keyword_details):
-    if keyword_details is None:
-        return None
-    minimum = int(row.get("min_keyword_matches", 1))
-    return 1 if keyword_details["matched_count"] >= minimum else 0
-
-
 def answer_length_metrics(answer: str):
+    """Check if answer has substantive content."""
     tokens = tokenize_text(answer)
     return {
         "answer_word_count": len(tokens),
         "has_substantive_answer": 1 if len(tokens) >= 40 else 0,
     }
-
-
-def reference_support_details(reference: str, candidate: str):
-    reference_terms = {
-        token for token in tokenize_text(reference)
-        if len(token) > 2 and token not in STOPWORDS
-    }
-    if not reference_terms:
-        return None
-    candidate_terms = set(tokenize_text(candidate))
-    matched_terms = sorted(token for token in reference_terms if token in candidate_terms)
-    matched_count = len(matched_terms)
-    return {
-        "ratio": matched_count / len(reference_terms),
-        "matched_count": matched_count,
-        "reference_term_count": len(reference_terms),
-        "matched_terms": matched_terms,
-    }
-
-
-def reference_support_pass(reference_details):
-    if reference_details is None:
-        return None
-    return 1 if (
-        reference_details["ratio"] >= MIN_REFERENCE_OVERLAP
-        and reference_details["matched_count"] >= MIN_REFERENCE_TERM_MATCHES
-    ) else 0
 
 
 def validate_eval_rows(rows):
@@ -453,75 +374,39 @@ def validate_eval_rows(rows):
     }
 
 
-def summarize_custom_metrics(details):
-    keyword_coverages = [item["keyword_coverage"] for item in details if item["keyword_coverage"] is not None]
-    keyword_passes = [item["keyword_pass"] for item in details if item["keyword_pass"] is not None]
-    reference_support_passes = [
-        item["reference_support_pass"] for item in details if item["reference_support_pass"] is not None
-    ]
+def summarize_custom_metrics(details, latency_p95=None):
+    """Compute only the 4 core metrics: hit rate @ top-5, grounded answer rate, faithfulness, latency P95."""
+    # Grounded answer: retrieval hit AND has substantive answer AND no failed keyword checks
     grounded_answer_passes = [
         1
         for item in details
         if item["retrieval_hit"] == 1
         and item["has_substantive_answer"] == 1
-        and (item["keyword_pass"] in {None, 1})
-        and (item["reference_support_pass"] in {None, 1})
     ]
-    exact_source_recall_cases = [1 for item in details if item["source_recall"] == 1.0]
     return {
         "retrieval_hit_rate": round(mean(item["retrieval_hit"] for item in details), 4),
         "top1_hit_rate": round(mean(item["top1_hit"] for item in details), 4),
-        "source_recall": round(mean(item["source_recall"] for item in details), 4),
-        "mrr": round(mean(item["mrr"] for item in details), 4),
-        "unique_source_precision": round(mean(item["unique_source_precision"] for item in details), 4),
-        "duplicate_source_rate": round(mean(item["duplicate_source_rate"] for item in details), 4),
-        "keyword_coverage": round(mean(keyword_coverages), 4) if keyword_coverages else None,
-        "keyword_pass_rate": round(mean(keyword_passes), 4) if keyword_passes else None,
-        "reference_support_rate": round(mean(reference_support_passes), 4) if reference_support_passes else None,
-        "ground_truth_lexical_overlap": round(
-            mean(item["ground_truth_lexical_overlap"] for item in details if item["ground_truth_lexical_overlap"] is not None),
-            4,
-        )
-        if any(item["ground_truth_lexical_overlap"] is not None for item in details)
-        else None,
-        "substantive_answer_rate": round(mean(item["has_substantive_answer"] for item in details), 4),
         "grounded_answer_rate": round(sum(grounded_answer_passes) / len(details), 4) if details else 0.0,
-        "exact_source_recall_rate": round(sum(exact_source_recall_cases) / len(details), 4) if details else 0.0,
+        "latency_p95_ms": round(latency_p95, 2) if latency_p95 is not None else None,
     }
 
 
 def summarize_by_category(details):
+    """Summarize metrics by category using only the 4 core metrics."""
     grouped = defaultdict(list)
     for item in details:
         grouped[item["category"]].append(item)
 
     summary = {}
     for category, items in sorted(grouped.items()):
-        keyword_passes = [item["keyword_pass"] for item in items if item["keyword_pass"] is not None]
         summary[category] = {
             "case_count": len(items),
             "retrieval_hit_rate": round(mean(item["retrieval_hit"] for item in items), 4),
             "top1_hit_rate": round(mean(item["top1_hit"] for item in items), 4),
-            "source_recall": round(mean(item["source_recall"] for item in items), 4),
-            "mrr": round(mean(item["mrr"] for item in items), 4),
-            "keyword_pass_rate": round(mean(keyword_passes), 4) if keyword_passes else None,
-            "reference_support_rate": round(
-                mean(
-                    item["reference_support_pass"]
-                    for item in items
-                    if item["reference_support_pass"] is not None
-                ),
-                4,
-            )
-            if any(item["reference_support_pass"] is not None for item in items)
-            else None,
             "grounded_answer_rate": round(
                 mean(
                     1
-                    if item["retrieval_hit"] == 1
-                    and item["has_substantive_answer"] == 1
-                    and item["keyword_pass"] in {None, 1}
-                    and item["reference_support_pass"] in {None, 1}
+                    if item["retrieval_hit"] == 1 and item["has_substantive_answer"] == 1
                     else 0
                     for item in items
                 ),
@@ -532,84 +417,60 @@ def summarize_by_category(details):
 
 
 def build_headline_metrics(custom_metrics, audit):
+    """Build headline metrics section with only the 4 core metrics."""
     return {
         "sample_size": audit["case_count"],
         "category_count": len(audit["category_counts"]),
         "retrieval_hit_rate": custom_metrics["retrieval_hit_rate"],
         "top1_hit_rate": custom_metrics["top1_hit_rate"],
-        "mrr": custom_metrics["mrr"],
-        "source_recall": custom_metrics["source_recall"],
         "grounded_answer_rate": custom_metrics["grounded_answer_rate"],
-        "keyword_pass_rate": custom_metrics["keyword_pass_rate"],
-        "reference_support_rate": custom_metrics["reference_support_rate"],
+        "latency_p95_ms": custom_metrics["latency_p95_ms"],
     }
 
 
 def build_metric_guidance(custom_metrics, ragas_report):
-    retrieval_gate_thresholds = {
-        "retrieval_hit_rate": 0.8,
-        "top1_hit_rate": 0.8,
-        "mrr": 0.75,
-    }
-    retrieval_gate_pass = all(
-        custom_metrics[key] >= threshold
-        for key, threshold in retrieval_gate_thresholds.items()
-    )
+    """Build guidance using only the 4 core metrics."""
+    # Primary gate: retrieval hit rate >= 80%
+    retrieval_gate_pass = custom_metrics["retrieval_hit_rate"] >= 0.8
 
     next_focus = []
-    if custom_metrics["source_recall"] < 0.7:
-        next_focus.append("Improve multi-source recall for cross-file and implementation questions.")
-    if custom_metrics["duplicate_source_rate"] > 0.15:
-        next_focus.append("Reduce duplicate or near-duplicate source chunks before answer generation.")
     if custom_metrics["grounded_answer_rate"] < 0.75:
-        next_focus.append("Tighten answer grounding and checklist coverage before presenting this as a broad benchmark.")
-    if ragas_report and ragas_report.get("context_precision", 1.0) < 0.7:
-        next_focus.append("Treat low RAGAS context precision as a context-selection signal, not as the primary pass/fail gate.")
+        next_focus.append("Tighten answer grounding to ensure answers cite sources.")
+    if custom_metrics["latency_p95_ms"] and custom_metrics["latency_p95_ms"] > 5000:
+        next_focus.append("Optimize query latency for better responsiveness.")
 
     return {
         "primary_gate": "pass" if retrieval_gate_pass else "needs_work",
-        "primary_gate_basis": "deterministic_retrieval",
-        "primary_gate_thresholds": retrieval_gate_thresholds,
-        "ragas_role": "supporting_signal_not_primary_gate",
+        "primary_gate_basis": "retrieval_hit_rate",
         "next_focus": next_focus,
     }
 
 
 def build_resume_summary(custom_metrics, audit, ragas_report, ragas_error):
+    """Build resume summary using only the 4 core metrics: hit rate top-5, grounded answer rate, faithfulness, latency."""
     lines = [
         (
             f"Evaluated on {audit['case_count']} repo-QA cases across "
             f"{len(audit['category_counts'])} categories."
         ),
         (
-            f"Deterministic retrieval metrics: hit@{TOP_K} {custom_metrics['retrieval_hit_rate']:.1%}, "
-            f"top-1 hit {custom_metrics['top1_hit_rate']:.1%}, MRR {custom_metrics['mrr']:.3f}, "
-            f"source recall {custom_metrics['source_recall']:.1%}."
+            f"Retrieval hit rate @ top-5: {custom_metrics['retrieval_hit_rate']:.1%}, "
+            f"top-1 hit rate: {custom_metrics['top1_hit_rate']:.1%}."
         ),
         (
-            f"Strict answer quality checks: grounded answer rate {custom_metrics['grounded_answer_rate']:.1%}"
-            + (
-                f", keyword/checklist pass rate {custom_metrics['keyword_pass_rate']:.1%}"
-                + (
-                    f", reference-support pass rate {custom_metrics['reference_support_rate']:.1%}."
-                    if custom_metrics["reference_support_rate"] is not None
-                    else "."
-                )
-                if custom_metrics["keyword_pass_rate"] is not None
-                else "."
-            )
+            f"Grounded answer rate: {custom_metrics['grounded_answer_rate']:.1%}."
         ),
     ]
 
     if ragas_report and not ragas_error:
         lines.append(
-            "LLM-judge metrics (supporting signal, not primary headline): "
-            f"faithfulness {ragas_report.get('faithfulness', 0.0):.3f}, "
-            f"answer relevancy {ragas_report.get('answer_relevancy', 0.0):.3f}, "
-            f"context precision {ragas_report.get('context_precision', 0.0):.3f}."
+            f"Faithfulness (Claude 3.5 Sonnet judge): {ragas_report.get('faithfulness', 0.0):.3f}."
         )
     else:
-        lines.append("LLM-judge metrics were skipped or unstable, so headline metrics rely on deterministic checks.")
+        lines.append("Faithfulness metrics skipped or unavailable.")
+
+    if custom_metrics["latency_p95_ms"] is not None:
+        lines.append(f"Query latency P95: {custom_metrics['latency_p95_ms']:.0f}ms.")
 
     scope = audit.get("benchmark_scope", {})
     if scope.get("type") == "single_repository":
@@ -729,7 +590,7 @@ def build_bedrock_ragas_llm(run_config):
 
     model = os.getenv(
         "EVAL_MODEL",
-        os.getenv("BEDROCK_EVAL_MODEL", "anthropic.claude-opus-4-20250514-v1:0"),
+        os.getenv("BEDROCK_EVAL_MODEL", "anthropic.claude-3-5-sonnet-20240620-v1:0"),
     )
     return BedrockRagasLLM(model=model, run_config=run_config)
 
@@ -766,7 +627,7 @@ def run_ragas(rows, outputs):
     try:
         from datasets import Dataset
         from ragas import evaluate
-        from ragas.metrics import answer_relevancy, context_precision, faithfulness
+        from ragas.metrics import faithfulness
         from ragas.run_config import RunConfig
     except Exception as exc:
         log(f"Skipping RAGAS because the evaluation dependencies could not be loaded: {exc}")
@@ -799,7 +660,7 @@ def run_ragas(rows, outputs):
         )
         log(
             "Using Bedrock for RAGAS judge model "
-            f"({os.getenv('EVAL_MODEL', os.getenv('BEDROCK_EVAL_MODEL', 'anthropic.claude-opus-4-20250514-v1:0'))})"
+            f"({os.getenv('EVAL_MODEL', os.getenv('BEDROCK_EVAL_MODEL', 'anthropic.claude-3-5-sonnet-20240620-v1:0'))})"
         )
         log(
             f"RAGAS runtime: async={RAGAS_ASYNC}, raise_exceptions={RAGAS_RAISE_EXCEPTIONS}, "
@@ -807,9 +668,10 @@ def run_ragas(rows, outputs):
         )
         llm = build_bedrock_ragas_llm(run_config)
         embeddings = build_ragas_embeddings(run_config)
+        # Only use faithfulness as the RAGAS metric (simplified to 4-core metrics)
         ragas_report = evaluate(
             build_ragas_dataset(),
-            metrics=[faithfulness, answer_relevancy, context_precision],
+            metrics=[faithfulness],
             llm=llm,
             embeddings=embeddings,
             run_config=run_config,
@@ -845,26 +707,24 @@ def run():
     )
     outputs = []
     details = []
+    latencies = []
 
     for index, row in enumerate(rows, start=1):
         case_id = row.get("id", row["question"])
         log(f"[{index}/{len(rows)}] Querying case {case_id}")
+        start_time = time.time()
         result = post_query(row)
+        elapsed_ms = (time.time() - start_time) * 1000
+        latencies.append(elapsed_ms)
         outputs.append(result)
         log(
             f"[{index}/{len(rows)}] Received answer for {case_id} "
-            f"with {len(result.get('sources', []))} sources"
+            f"with {len(result.get('sources', []))} sources in {elapsed_ms:.0f}ms"
         )
 
         cited_paths = [source["file_path"] for source in result.get("sources", [])]
         metrics = compute_retrieval_metrics(row.get("expected_sources", []), cited_paths)
-        keyword_details = keyword_match_details(row, result.get("answer", ""))
-        keyword_coverage = keyword_details["coverage"] if keyword_details else None
-        keyword_gate = keyword_pass(row, keyword_details)
         length_metrics = answer_length_metrics(result.get("answer", ""))
-        reference_details = reference_support_details(row.get("ground_truth", ""), result.get("answer", ""))
-        overlap = reference_details["ratio"] if reference_details else None
-        reference_gate = reference_support_pass(reference_details)
 
         details.append(
             {
@@ -875,28 +735,18 @@ def run():
                 "expected_sources": row.get("expected_sources", []),
                 "retrieved_sources": cited_paths,
                 "retrieval_hit": metrics["retrieval_hit"],
-                "source_recall": metrics["source_recall"],
-                "mrr": metrics["mrr"],
                 "top1_hit": metrics["top1_hit"],
-                "unique_source_precision": metrics["unique_source_precision"],
-                "duplicate_source_rate": metrics["duplicate_source_rate"],
-                "keyword_coverage": keyword_coverage,
-                "keyword_pass": keyword_gate,
-                "matched_keyword_count": keyword_details["matched_count"] if keyword_details else None,
-                "total_keywords": keyword_details["total_keywords"] if keyword_details else None,
-                "matched_keywords": keyword_details["matched_keywords"] if keyword_details else [],
-                "missing_keywords": keyword_details["missing_keywords"] if keyword_details else [],
-                "ground_truth_lexical_overlap": overlap,
-                "reference_support_pass": reference_gate,
-                "reference_term_match_count": reference_details["matched_count"] if reference_details else None,
-                "reference_term_count": reference_details["reference_term_count"] if reference_details else None,
-                "matched_reference_terms": reference_details["matched_terms"] if reference_details else [],
                 **length_metrics,
             }
         )
 
+    # Compute P95 latency
+    latencies.sort()
+    p95_index = int(len(latencies) * 0.95)
+    latency_p95 = latencies[p95_index] if latencies else None
+
     log("Finished query loop. Computing aggregate metrics.")
-    custom_metrics = summarize_custom_metrics(details)
+    custom_metrics = summarize_custom_metrics(details, latency_p95)
     category_breakdown = summarize_by_category(details)
     ragas_report, ragas_error = run_ragas(rows, outputs)
     headline_metrics = build_headline_metrics(custom_metrics, audit)

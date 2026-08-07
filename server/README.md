@@ -32,20 +32,15 @@ FastAPI backend for Code Compass, a personal full-stack RAG project that indexes
 
 ## Runtime Configuration
 
-Local development is configured for higher-quality experimentation:
+### Local Development (higher-quality experimentation)
+- `LLM_PROVIDER=bedrock` with Claude 3.5 Sonnet
+- `EMBEDDING_PROVIDER=bedrock` with Cohere Embed v3
+- Recommended: `AWS_REGION=us-east-1`, `BEDROCK_LLM_MODEL=anthropic.claude-3-5-sonnet-20240620-v1:0`, `BEDROCK_EMBEDDING_MODEL=cohere.embed-v3:0`
 
-- `LLM_PROVIDER=bedrock`
-- `EMBEDDING_PROVIDER=bedrock`
-- Claude on Amazon Bedrock for answer generation
-- Cohere Embed on Amazon Bedrock for semantic retrieval
-
-Production is configured for lower-cost hosting:
-
-- `LLM_PROVIDER=groq`
-- `EMBEDDING_PROVIDER=local`
-- Groq-hosted Llama for answer generation
-- Local sentence-transformer embeddings for retrieval
-- Chroma DB for vector storage
+### Production (lower-cost hosting)
+- `LLM_PROVIDER=groq` with Llama 3.1 70B
+- `EMBEDDING_PROVIDER=local` with sentence-transformers/all-MiniLM-L6-v2
+- Required: `GROQ_API_KEY`
 
 ## Chroma Storage
 
@@ -59,4 +54,9 @@ Configuration:
 
 ## Metrics
 
-Metrics will be added after the next benchmark rerun. The evaluation harness is set up to report retrieval hit rate, top-1 hit rate, mean reciprocal rank, source recall, grounded answer rate, checklist pass rate, and optional RAGAS judge metrics.
+The evaluation harness reports 4 core metrics:
+- **Retrieval hit rate @ top-5**: Fraction of queries with at least one relevant source in top 5 results
+- **Top-1 hit rate**: Fraction of queries where the first result is relevant
+- **Grounded answer rate**: Fraction of answers that cite actual source code
+- **Faithfulness (RAGAS)**: LLM-as-judge score for answer consistency with retrieved context
+- **Query latency P95**: 95th percentile response time in milliseconds

@@ -488,7 +488,7 @@ class CodebaseRAGSystem:
 You are answering questions as a knowledgeable teammate who has carefully read this repository.
 
 Rules:
-1. Use only the supplied repository context.
+1. Use ONLY the supplied repository context to answer. Do not use external knowledge.
 2. Answer conversationally and directly, as if the repo is explaining itself to the user.
 3. Do not say "Based on the provided context", "The repository is about", or similar throat-clearing phrases.
 4. Be concrete about files, functions, and behavior.
@@ -498,7 +498,7 @@ Rules:
 8. Use short sections or bullets only when they genuinely help readability.
 9. Do not leave unfinished headings, dangling bullets, or trailing markdown markers like #, ##, or ###.
 10. Do not include inline citation markers like [Source 1] in the prose. The UI already shows sources separately.
-11. Do not make claims that are not directly supported by the supplied sources.
+11. If you cannot answer the question using the provided context, say: "I cannot find sufficient evidence in the codebase to answer this question."
 12. Prefer the most canonical source files for API and implementation questions, such as package exports, core modules, and session/query code, over tutorial prose when they disagree in specificity.
 13. Keep the answer tight. Lead with the direct answer, then add only the most important supporting detail.
 """
@@ -584,7 +584,7 @@ Do not leave the answer unfinished.
             self.llm_client = create_bedrock_runtime_client()
             self.llm_model = os.getenv(
                 "BEDROCK_LLM_MODEL",
-                "anthropic.claude-sonnet-4-20250514-v1:0",
+                "anthropic.claude-3-5-sonnet-20240620-v1:0",
             )
             return
 
@@ -604,7 +604,7 @@ Do not leave the answer unfinished.
                     "GOOGLE_CLOUD_PROJECT must be set when using Vertex AI LLMs."
                 )
 
-            self.llm_model = os.getenv("VERTEX_LLM_MODEL", "claude-sonnet-4@20250514")
+            self.llm_model = os.getenv("VERTEX_LLM_MODEL", "claude-3-5-sonnet@20240620")
             if self.llm_model.startswith("claude-"):
                 try:
                     from anthropic import AnthropicVertex
