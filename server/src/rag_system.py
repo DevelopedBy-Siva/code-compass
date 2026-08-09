@@ -278,6 +278,9 @@ class CodebaseRAGSystem:
                 repo.session_expires_at = self._session_expiry()
                 self._mark_repo_updated(repo)
                 self.repo_chunks[repo.id] = serialized
+            # Build the lexical (BM25) index once now, instead of
+            # re-tokenizing every chunk in the repo on every question.
+            self.hybrid_search.build_for_repository(repo.id, serialized)
             self.vector_store.save()
             with self.repo_lock:
                 self.indexing_progress.pop(repo.id, None)
@@ -343,6 +346,7 @@ class CodebaseRAGSystem:
         question: str,
         top_k: int = 8,
         history=None,
+        debug_retrieval: bool = False,
     ) -> dict:
         with self.repo_lock:
             self._cleanup_expired_sessions()
@@ -390,9 +394,17 @@ class CodebaseRAGSystem:
             repo_chunks,
             retrieval_query,
             top_k=search_depth,
+            repo_id=repo_id,
         )
+
         semantic_hits = self.hybrid_search.normalize_semantic_results(semantic_hits)
-        fused = self.hybrid_search.reciprocal_rank_fusion(lexical_hits, semantic_hits, top_k=search_depth)
+        semantic_ranks = self._rank_map(semantic_hits)
+        lexical_ranks = self._rank_map(lexical_hits)
+
+        fused = self.hybrid_search.reciprocal_rank_fusion(
+            lexical_hits, semantic_hits, top_k=search_depth
+        )
+        fused_ranks = self._rank_map(fused)
 
         path_hits = self._path_intent_search(
             repo_chunks,
@@ -400,26 +412,67 @@ class CodebaseRAGSystem:
             retrieval_query,
             top_k=search_depth,
         )
-        fused = self._merge_ranked_candidates(fused, path_hits, top_k=search_depth)
+        path_ranks = self._rank_map(path_hits)
+
+        merged = self._merge_ranked_candidates(fused, path_hits, top_k=search_depth)
 
         rerank_query = retrieval_query if question_intent in deep_search_intents else question
 
-        # FIX: rerank to a small candidate pool first (20), then let
-        # _prioritize_results and _select_answer_sources trim to final top_k.
-        # Previously rerank was called with search_depth (up to 120), meaning
-        # the LLM received far too many chunks and faithfulness dropped.
-        rerank_pool = min(search_depth, 20)
-        reranked = self.hybrid_search.rerank(rerank_query, fused, top_k=rerank_pool)
+        # Rerank broadly for recall. This is independent of the final LLM
+        # context size, which remains capped below.
+        rerank_pool = min(search_depth, 50)
+        reranked = self.hybrid_search.rerank(rerank_query, merged, top_k=rerank_pool)
+        rerank_ranks = self._rank_map(reranked)
 
-        reranked = self._prioritize_results(question, retrieval_query, reranked, top_k=top_k)
+        prioritized = self._prioritize_results(
+            question, retrieval_query, reranked, top_k=top_k
+        )
 
-        # FIX: cap final sources at 5 instead of top_k (8).
-        # 5 sources × 1500 chars = ~7500 chars context, which the LLM handles well.
-        # 8 sources × 2500 chars = ~20000 chars, which causes lost-in-the-middle issues.
         final_top_k = min(top_k, 5)
-        reranked = self._select_answer_sources(question, reranked, top_k=final_top_k)
+        final_sources = self._select_answer_sources(
+            question, prioritized, top_k=final_top_k
+        )
+        final_ranks = self._rank_map(final_sources)
 
-        answer = self._generate_answer(repo, question, reranked, normalized_history)
+        retrieval_debug = []
+        if debug_retrieval:
+            all_candidates = {}
+            for stage_items in (semantic_hits, lexical_hits, fused, path_hits, merged, reranked, prioritized, final_sources):
+                for item in stage_items:
+                    all_candidates[item["id"]] = {**all_candidates.get(item["id"], {}), **item}
+
+            for chunk_id, item in all_candidates.items():
+                retrieval_debug.append(
+                    {
+                        "id": chunk_id,
+                        "file_path": item.get("file_path"),
+                        "symbol_name": item.get("symbol_name"),
+                        "semantic_rank": semantic_ranks.get(chunk_id),
+                        "bm25_rank": lexical_ranks.get(chunk_id),
+                        "fused_rank": fused_ranks.get(chunk_id),
+                        "path_rank": path_ranks.get(chunk_id),
+                        "rerank_rank": rerank_ranks.get(chunk_id),
+                        "final_rank": final_ranks.get(chunk_id),
+                        "semantic_score": item.get("semantic_score"),
+                        "bm25_score": item.get("bm25_score"),
+                        "rrf_score": item.get("rrf_score"),
+                        "path_score": item.get("path_score"),
+                        "rerank_score": item.get("rerank_score"),
+                        "final_score": item.get("final_score"),
+                    }
+                )
+
+            retrieval_debug.sort(
+                key=lambda item: (
+                    item["final_rank"] is None,
+                    item["final_rank"] or 10**9,
+                    item["rerank_rank"] or 10**9,
+                )
+            )
+
+        answer = self._generate_answer(repo, question, final_sources, normalized_history)
+        if debug_retrieval:
+            answer["retrieval_debug"] = retrieval_debug
         return answer
 
     def end_session(self, session_key: str):
@@ -497,7 +550,7 @@ Rules:
 7. Keep the answer complete. Do not stop mid-sentence.
 8. Use short sections or bullets only when they genuinely help readability.
 9. Do not leave unfinished headings, dangling bullets, or trailing markdown markers like #, ##, or ###.
-10. Do not include inline citation markers like [Source 1] in the prose. The UI already shows sources separately.
+10. Back up factual claims with inline citations. After a sentence or clause that relies on a specific source, add its number in brackets, e.g. [1] or [2][3] if multiple sources support it. Use only the source numbers given above (Source 1, Source 2, ...) and never invent a number.
 11. If you cannot answer the question using the provided context, say: "I cannot find sufficient evidence in the codebase to answer this question."
 12. Prefer the most canonical source files for API and implementation questions, such as package exports, core modules, and session/query code, over tutorial prose when they disagree in specificity.
 13. Keep the answer tight. Lead with the direct answer, then add only the most important supporting detail.
@@ -560,15 +613,9 @@ Do not leave the answer unfinished.
                 )
 
         answer_text = self._finalize_answer(answer_text)
+        answer_text, citations = self._attach_citations(answer_text, sources)
         confidence = self._estimate_confidence(sources)
         summary = " ".join(answer_text.split())[:160] if answer_text else ""
-        citations = [
-            {
-                "source": index,
-                "reason": f"Relevant context from {source['file_path']}",
-            }
-            for index, source in enumerate(sources[: min(len(sources), 4)], start=1)
-        ]
 
         return {
             "answer": answer_text,
@@ -699,7 +746,9 @@ Do not leave the answer unfinished.
     def _normalize_markdown_answer(raw_text: str) -> str:
         cleaned = (raw_text or "").strip()
         cleaned = re.sub(r"^```(?:markdown|md)?\s*|\s*```$", "", cleaned, flags=re.IGNORECASE)
-        cleaned = re.sub(r"\s*\[(?:Source\s+\d+(?:\s*,\s*Source\s+\d+)*)\]", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(
+            r"\[Source\s+(\d+)\]", r"[\1]", cleaned, flags=re.IGNORECASE
+        )
         cleaned = re.sub(
             r"^(?:based on the provided context[,:\s-]*|from the provided context[,:\s-]*)",
             "",
@@ -767,6 +816,44 @@ Do not leave the answer unfinished.
         if len(tokens) >= 20 and cleaned[-1] not in {".", "!", "?", "\"", "'", "`"}:
             return True
         return False
+
+    @staticmethod
+    def _attach_citations(answer_text: str, sources: List[dict]) -> tuple[str, List[dict]]:
+        max_source = len(sources)
+        if max_source == 0 or not answer_text:
+            return answer_text, []
+
+        cited_numbers = set()
+
+        def _keep_or_drop(match: "re.Match") -> str:
+            number = int(match.group(1))
+            if 1 <= number <= max_source:
+                cited_numbers.add(number)
+                return match.group(0)
+            # Drop citation markers that don't correspond to a real source.
+            return ""
+
+        cleaned_text = re.sub(r"\[(\d+)\]", _keep_or_drop, answer_text)
+        cleaned_text = re.sub(r"[ \t]+([.,;:!?])", r"\1", cleaned_text).strip()
+
+        # If the model didn't cite anything inline, fall back to listing every
+        # retrieved source so the response is still grounded in a traceable way.
+        numbers_to_cite = cited_numbers if cited_numbers else set(range(1, max_source + 1))
+
+        citations = []
+        for index in sorted(numbers_to_cite):
+            source = sources[index - 1]
+            citations.append(
+                {
+                    "source": index,
+                    "file_path": source["file_path"],
+                    "symbol_name": source.get("symbol_name"),
+                    "line_start": source.get("line_start"),
+                    "line_end": source.get("line_end"),
+                    "location": f"{source['file_path']}:{source.get('line_start')}-{source.get('line_end')}",
+                }
+            )
+        return cleaned_text, citations
 
     @staticmethod
     def _estimate_confidence(sources: List[dict]) -> str:
@@ -894,6 +981,29 @@ Do not leave the answer unfinished.
             parts.append(f"Previous answer: {recent_assistant[0][:300]}")
         return "\n".join(parts)
 
+    @staticmethod
+    def _rank_map(items: List[dict]) -> Dict[str, int]:
+        return {item["id"]: rank for rank, item in enumerate(items, start=1)}
+
+    @staticmethod
+    def _minmax(values: List[float]) -> List[float]:
+        if not values:
+            return []
+        low = min(values)
+        high = max(values)
+        if high == low:
+            return [0.0 for _ in values]
+        return [(value - low) / (high - low) for value in values]
+
+    @staticmethod
+    def _source_family(file_path: str) -> str:
+        parts = (file_path or "").strip("/").split("/")
+        if not parts or not parts[0]:
+            return ""
+        if parts[0] in {"packages", "apps"} and len(parts) >= 2:
+            return "/".join(parts[:2])
+        return parts[0]
+
     def _merge_ranked_candidates(
         self,
         ranked_results: List[dict],
@@ -1002,6 +1112,9 @@ Do not leave the answer unfinished.
         results: List[dict],
         top_k: int,
     ) -> List[dict]:
+        if not results:
+            return []
+
         combined_query = f"{question} {retrieval_query}".lower()
         wants_code = any(
             token in combined_query
@@ -1012,41 +1125,47 @@ Do not leave the answer unfinished.
             "docs",
             "overview",
         }
-        wants_repo_overview = self._is_repo_overview_question(question) or self._is_repo_overview_question(
-            retrieval_query
+        wants_repo_overview = self._is_repo_overview_question(
+            question
+        ) or self._is_repo_overview_question(retrieval_query)
+
+        rerank_norm = self._minmax([float(item.get("rerank_score", 0.0)) for item in results])
+        rrf_norm = self._minmax([float(item.get("rrf_score", 0.0)) for item in results])
+        path_norm = self._minmax([float(item.get("path_score", 0.0)) for item in results])
+        canonical_norm = self._minmax(
+            [float(self._canonical_path_priority(item, combined_query)) for item in results]
         )
 
-        def sort_key(item: dict):
+        scored = []
+        for index, item in enumerate(results):
+            enriched = dict(item)
             is_doc = self._is_doc_source(item)
-            return (
-                self._canonical_path_priority(item, combined_query),
-                float(item.get("path_score", 0.0)),
-                self._doc_priority(item),
-                1 if wants_repo_overview and is_doc else 0,
-                1 if (wants_docs and is_doc) or (not wants_docs and not is_doc) else 0,
-                1 if wants_code and not is_doc else 0,
-                1 if question_intent in {"api", "implementation", "cross_file", "error_handling", "setup"} and not is_doc else 0,
-                float(item.get("rerank_score", 0.0)),
-                float(item.get("semantic_score", 0.0)),
-                float(item.get("bm25_score", 0.0)),
+            intent_bonus = 0.0
+
+            if wants_repo_overview and is_doc:
+                intent_bonus += 1.0
+            if wants_docs and is_doc:
+                intent_bonus += 0.8
+            if wants_code and not is_doc:
+                intent_bonus += 0.5
+            if (
+                question_intent
+                in {"api", "implementation", "cross_file", "error_handling", "setup"}
+                and not is_doc
+            ):
+                intent_bonus += 0.4
+
+            enriched["final_score"] = (
+                0.50 * rerank_norm[index]
+                + 0.20 * rrf_norm[index]
+                + 0.12 * path_norm[index]
+                + 0.10 * canonical_norm[index]
+                + 0.08 * min(intent_bonus, 1.0)
             )
+            scored.append(enriched)
 
-        ranked = sorted(results, key=sort_key, reverse=True)
-        if wants_docs or wants_repo_overview:
-            return ranked[:top_k]
-
-        selected = []
-        doc_items = []
-        for item in ranked:
-            if self._is_doc_source(item):
-                doc_items.append(item)
-                continue
-            selected.append(item)
-            if len(selected) == top_k:
-                return selected
-
-        selected.extend(doc_items[: max(1, top_k - len(selected))])
-        return selected[:top_k]
+        scored.sort(key=lambda item: item["final_score"], reverse=True)
+        return scored[:top_k]
 
     def _select_answer_sources(
         self,
@@ -1060,14 +1179,33 @@ Do not leave the answer unfinished.
         intent = self._question_intent(question)
         max_per_file = 2 if intent in {"overview", "docs"} else 1
         selected = []
+        selected_ids = set()
         file_counts = {}
+        used_families = set()
+
+        if intent == "cross_file":
+            for item in results:
+                file_path = item.get("file_path", "")
+                family = self._source_family(file_path)
+                if family and family in used_families:
+                    continue
+                selected.append(item)
+                selected_ids.add(item["id"])
+                if family:
+                    used_families.add(family)
+                file_counts[file_path] = 1
+                if len(selected) == top_k:
+                    return selected
 
         for item in results:
+            if item["id"] in selected_ids:
+                continue
             file_path = item.get("file_path", "")
             count = file_counts.get(file_path, 0)
             if count >= max_per_file:
                 continue
             selected.append(item)
+            selected_ids.add(item["id"])
             file_counts[file_path] = count + 1
             if len(selected) == top_k:
                 break
@@ -1226,27 +1364,44 @@ Do not leave the answer unfinished.
     @staticmethod
     def _is_repo_overview_question(question: str) -> bool:
         normalized = " ".join((question or "").lower().split())
-        return any(
-            phrase in normalized
-            for phrase in {
-                "what is the repo about",
-                "what is this repo about",
-                "what does the repo do",
-                "what does this repo do",
-                "what is the repository about",
-                "what does the repository do",
-                "what is this project about",
-                "what does this project do",
-                "repo summary",
-                "repository summary",
-                "project summary",
-                "summarize the repo",
-                "summarize this repo",
-                "repo overview",
-                "repository overview",
-                "project overview",
-            }
+        explicit_phrases = {
+            "what is the repo about",
+            "what is this repo about",
+            "what does the repo do",
+            "what does this repo do",
+            "what is the repository about",
+            "what does the repository do",
+            "what is this project about",
+            "what does this project do",
+            "repo summary",
+            "repository summary",
+            "project summary",
+            "summarize the repo",
+            "summarize this repo",
+            "repo overview",
+            "repository overview",
+            "project overview",
+        }
+        if any(phrase in normalized for phrase in explicit_phrases):
+            return True
+
+        code_markers = {
+            "function", "class", "method", "endpoint", "api", "router",
+            "route", "implementation", "implemented", "file", "package",
+            "module", "where", "tests",
+        }
+        if any(re.search(rf"(?<![a-z0-9]){re.escape(marker)}(?![a-z0-9])", normalized) for marker in code_markers):
+            return False
+
+        purpose_patterns = (
+            r"^what is [\w.-]+(?:\s+and\s+what\s+.+)?\??$",
+            r"^what does [\w.-]+ do\??$",
+            r"^what problem does [\w.-]+ solve\??$",
+            r"^what product problem .+ solve\??$",
+            r"^(?:describe|explain) [\w.-]+\??$",
+            r"^(?:what is|explain|describe) the (?:purpose|project|repository)\b",
         )
+        return any(re.search(pattern, normalized) for pattern in purpose_patterns)
 
     @staticmethod
     def _is_doc_source(item: dict) -> bool:
@@ -1267,189 +1422,104 @@ Do not leave the answer unfinished.
 
     @staticmethod
     def _domain_path_hints(query: str) -> List[str]:
+        """Map generic question concepts to the directory/file naming
+        conventions real-world repos tend to use for that concept.
+
+        This intentionally stays convention-level (not tied to any single
+        project's folder layout) because this system indexes arbitrary
+        GitHub repositories: a hint list hardcoded to one repo's paths would
+        never match anything in any other repo, silently doing nothing for
+        almost every user while looking like it's helping. These patterns
+        are matched as path *substrings* by the callers, so they work across
+        Python/JS/TS/Go/Java/Rust project layouts without needing to know
+        the specific repo's structure in advance.
+        """
         normalized = " ".join((query or "").lower().split())
         hints = []
 
         def has_any(terms: set[str]) -> bool:
-            matched = False
-            for term in terms:
-                if term.startswith("/"):
-                    matched = matched or term in normalized
-                    continue
-                matched = matched or bool(
-                    re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", normalized)
-                )
-            return matched
+            return any(
+                bool(re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", normalized))
+                for term in terms
+            )
 
         rules = [
             (
-                {"email", "emails", "mailer", "notification", "template"},
-                [
-                    "packages/email",
-                    "packages/lib/server-only/email",
-                    "packages/lib/jobs/definitions/emails",
-                ],
+                {"auth", "authentication", "authorization", "login", "session", "bearer", "oauth", "jwt", "token"},
+                ["auth", "authentication", "authorization", "login", "session", "middleware/auth"],
             ),
             (
-                {"signing", "certificate", "gcloud", "hsm", "p12", "pdf signing"},
-                [
-                    "packages/signing",
-                    "packages/signing/transports",
-                    "packages/signing/helpers",
-                    "packages/lib/jobs/definitions/internal/seal-document",
-                ],
+                {"api", "endpoint", "route", "router", "controller", "handler", "rest", "graphql", "trpc"},
+                ["api", "routes", "routers", "controllers", "handlers", "endpoints", "resolvers"],
             ),
             (
-                {"job", "jobs", "background", "inngest", "bullmq", "queue"},
-                [
-                    "packages/lib/jobs",
-                    "packages/lib/jobs/client",
-                    "packages/lib/jobs/definitions",
-                    "apps/remix/server/router.ts",
-                ],
+                {"database", "db", "sql", "orm", "migration", "migrations", "schema", "model", "models"},
+                ["models", "schema", "migrations", "db", "database", "entities", "repositories", "prisma"],
             ),
             (
-                {"webhook", "webhooks", "ssrf"},
-                [
-                    "packages/lib/server-only/webhooks",
-                    "packages/lib/jobs/definitions/internal/execute-webhook",
-                ],
+                {"test", "tests", "testing", "pytest", "spec", "e2e", "unit test", "integration test"},
+                ["test", "tests", "__tests__", "spec", "e2e", "testing"],
             ),
             (
-                {"recipient", "recipients"},
+                {"config", "configuration", "env", "environment", "settings", "setup", "install", "installation"},
                 [
-                    "packages/lib/server-only/recipient",
-                    "packages/trpc/server/recipient-router",
-                ],
-            ),
-            (
-                {"field", "fields"},
-                [
-                    "packages/lib/server-only/field",
-                    "packages/trpc/server/field-router",
-                    "packages/lib/universal/field-renderer",
-                ],
-            ),
-            (
-                {"template", "templates"},
-                [
-                    "packages/lib/server-only/template",
-                    "packages/trpc/server/template-router",
-                ],
-            ),
-            (
-                {"envelope", "envelopes"},
-                [
-                    "packages/lib/server-only/envelope",
-                    "packages/lib/server-only/envelope-item",
-                    "packages/trpc/server/envelope-router",
-                ],
-            ),
-            (
-                {"document", "documents"},
-                [
-                    "packages/lib/server-only/document",
-                    "packages/lib/server-only/document-data",
-                    "packages/trpc/server/document-router",
-                ],
-            ),
-            (
-                {"pdf", "storage", "upload", "s3"},
-                [
-                    "packages/lib/server-only/pdf",
-                    "packages/lib/server-only/document-data",
-                    "packages/lib/universal/upload",
-                    "apps/remix/server/api/files",
-                ],
-            ),
-            (
-                {"api v1", "/api/v1", "ts-rest", "ts rest"},
-                [
-                    "packages/api",
-                    "packages/api/v1",
-                    "packages/api/hono.ts",
-                ],
-            ),
-            (
-                {"api v2", "/api/v2", "openapi", "trpc-to-openapi"},
-                [
-                    "packages/trpc/server",
-                    "packages/trpc/server/open-api.ts",
-                    "apps/remix/server/router.ts",
-                    "apps/remix/server/trpc",
-                ],
-            ),
-            (
-                {"trpc", "frontend", "backend", "/api/trpc", "internal api"},
-                [
-                    "packages/trpc",
-                    "packages/trpc/react",
-                    "packages/trpc/client",
-                    "packages/trpc/server/context.ts",
-                    "apps/remix/server/trpc",
-                    "apps/remix/server/router.ts",
-                ],
-            ),
-            (
-                {"auth", "authentication", "session", "api token", "authorization", "bearer"},
-                [
-                    "packages/auth",
-                    "packages/lib/server-only/auth",
-                    "packages/lib/server-only/public-api",
-                    "packages/trpc/server/context.ts",
-                    "packages/trpc/server/trpc.ts",
-                    "packages/api/v1/middleware/authenticated.ts",
-                    "apps/remix/server/context.ts",
-                ],
-            ),
-            (
-                {"database", "postgres", "postgresql", "prisma", "kysely", "migration"},
-                [
-                    "packages/prisma",
-                    "packages/prisma/schema.prisma",
-                    "packages/prisma/migrations",
-                    ".env.example",
-                ],
-            ),
-            (
-                {"remix", "hono", "react router", "route", "routes", "user interface"},
-                [
-                    "apps/remix/server",
-                    "apps/remix/app/routes",
-                    "apps/remix/app/root.tsx",
-                    "apps/remix/app/routes.ts",
-                ],
-            ),
-            (
-                {"test", "tests", "e2e", "playwright", "spec", "vitest"},
-                [
-                    "packages/app-tests",
-                    "packages/lib/vitest.config.ts",
-                    "packages/lib/package.json",
-                ],
-            ),
-            (
-                {
                     "config",
-                    "configuration",
-                    "env",
-                    "environment",
-                    "local development",
-                    "self-host",
-                    "self hosting",
-                    "workspace",
-                    "workspaces",
-                    "turborepo",
-                    "turbo",
-                },
-                [
+                    "settings",
                     ".env.example",
-                    "README.md",
+                    "readme.md",
                     "package.json",
-                    "turbo.json",
-                    "apps/docs/content/docs/developers/local-development",
-                    "apps/docs/content/docs/self-hosting/configuration",
+                    "pyproject.toml",
+                    "docker-compose",
+                    "dockerfile",
                 ],
+            ),
+            (
+                {"job", "jobs", "background", "worker", "workers", "queue", "task", "tasks", "cron", "scheduler"},
+                ["jobs", "workers", "queue", "tasks", "scheduler"],
+            ),
+            (
+                {"webhook", "webhooks", "callback", "callbacks"},
+                ["webhook", "webhooks", "callbacks"],
+            ),
+            (
+                {"email", "emails", "mailer", "notification", "notifications"},
+                ["email", "mailer", "notifications", "templates"],
+            ),
+            (
+                {"upload", "storage", "s3", "file", "files", "attachment", "blob"},
+                ["storage", "upload", "uploads", "files", "attachments"],
+            ),
+            (
+                {"cli", "command line", "command-line"},
+                ["cli", "commands", "bin"],
+            ),
+            (
+                {"ui", "frontend", "component", "components", "page", "pages", "view", "views"},
+                ["components", "pages", "views", "ui", "frontend", "client", "app"],
+            ),
+            (
+                {"backend", "server", "service", "services"},
+                ["server", "backend", "services", "api"],
+            ),
+            (
+                {"middleware", "interceptor"},
+                ["middleware", "interceptors"],
+            ),
+            (
+                {"docker", "container", "deployment", "deploy", "kubernetes", "helm", "ci", "cd", "pipeline"},
+                [".github/workflows", "docker", "dockerfile", "docker-compose", "helm", "deploy", "deployment", "ci"],
+            ),
+            (
+                {"docs", "documentation", "readme"},
+                ["readme.md", "docs", "documentation"],
+            ),
+            (
+                {"util", "utils", "utility", "helper", "helpers", "common", "shared"},
+                ["utils", "util", "helpers", "common", "shared", "lib"],
+            ),
+            (
+                {"type", "types", "interface", "schema"},
+                ["types", "type", "interfaces", "schemas"],
             ),
         ]
 

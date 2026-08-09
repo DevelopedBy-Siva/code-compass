@@ -20,6 +20,16 @@ SUPPORTED_EXTENSIONS = {
     ".java",
     ".go",
     ".rs",
+    ".c",
+    ".h",
+    ".cc",
+    ".cpp",
+    ".cxx",
+    ".hpp",
+    ".hh",
+    ".y",
+    ".test",
+    ".tcl",
     ".md",
     ".mdx",
     ".json",
@@ -32,9 +42,18 @@ SUPPORTED_EXTENSIONS = {
     ".prisma",
 }
 
+# Extensionless / templated files that matter for a repo even though their
+# suffix (".in", no suffix, etc.) isn't a language extension on its own.
 SUPPORTED_FILENAMES = {
     ".env.example",
     "Dockerfile",
+}
+
+# Suffixes matched in addition to SUPPORTED_EXTENSIONS, for files like
+# "sqlite.h.in" or "Makefile.in" where the *last* suffix (".in") is a
+# build-template marker rather than the real language.
+SUPPORTED_TEMPLATE_SUFFIXES = {
+    ".in",
 }
 
 IGNORED_FILENAMES = {
@@ -68,7 +87,7 @@ IGNORED_DIRS = {
     "__pycache__",
 }
 
-MAX_FILE_SIZE_BYTES = 250_000
+MAX_FILE_SIZE_BYTES = 400_000
 
 
 class RepoFetcher:
@@ -181,6 +200,7 @@ class RepoFetcher:
                 continue
             if (
                 file_path.suffix.lower() not in SUPPORTED_EXTENSIONS
+                and file_path.suffix.lower() not in SUPPORTED_TEMPLATE_SUFFIXES
                 and file_path.name not in SUPPORTED_FILENAMES
             ):
                 continue

@@ -320,13 +320,17 @@ class EmbeddingGenerator:
         return np.array(embeddings, dtype="float32")
 
     def _build_bedrock_embedding_request(self, texts: List[str], input_type: str) -> dict:
+        max_chars = int(os.getenv("BEDROCK_EMBEDDING_MAX_CHARS", "2000"))
+
         payload = {
-            "texts": texts,
+            "texts": [text[:max_chars] for text in texts],
             "input_type": input_type,
             "embedding_types": ["float"],
         }
+
         if self.bedrock_output_dimensionality:
             payload["output_dimension"] = self.bedrock_output_dimensionality
+
         return payload
 
     def _encode_with_backoff(
