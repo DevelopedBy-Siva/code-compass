@@ -5,14 +5,15 @@ from datetime import datetime, timedelta
 from threading import RLock
 from typing import Dict, List, Optional
 
-from openai import OpenAI
+import boto3
 
 from src.code_parser import CodeParser
-from src.bedrock_claude import create_bedrock_runtime_client, generate_bedrock_claude_text
 from src.embeddings import EmbeddingGenerator
 from src.hybrid_search import HybridSearchEngine
 from src.repo_fetcher import RepoFetcher
 from src.vector_store import ChromaVectorStore
+
+BEDROCK_QWEN_MODEL_ID = "qwen.qwen3-coder-next"
 
 
 class SessionCancelledError(RuntimeError):
@@ -53,15 +54,11 @@ class CodebaseRAGSystem:
             index_path=index_path or "./data/chroma",
             persist=True,
         )
-        self.hybrid_search = HybridSearchEngine(
-            reranker_model=os.getenv(
-                "RERANKER_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2"
-            )
-        )
+        self.hybrid_search = HybridSearchEngine()
         self.app_env = os.getenv("APP_ENV", os.getenv("ENVIRONMENT", "local")).lower()
-        self.llm_provider = os.getenv("LLM_PROVIDER", "bedrock").lower()
+        self.llm_provider = "bedrock"
         self.llm_client = None
-        self.llm_model = ""
+        self.llm_model = BEDROCK_QWEN_MODEL_ID
         self._configure_llm()
         self.session_ttl_minutes = int(os.getenv("SESSION_TTL_MINUTES", "120"))
         self.repo_lock = RLock()
@@ -278,8 +275,6 @@ class CodebaseRAGSystem:
                 repo.session_expires_at = self._session_expiry()
                 self._mark_repo_updated(repo)
                 self.repo_chunks[repo.id] = serialized
-            # Build the lexical (BM25) index once now, instead of
-            # re-tokenizing every chunk in the repo on every question.
             self.hybrid_search.build_for_repository(repo.id, serialized)
             self.vector_store.save()
             with self.repo_lock:
@@ -418,8 +413,6 @@ class CodebaseRAGSystem:
 
         rerank_query = retrieval_query if question_intent in deep_search_intents else question
 
-        # Rerank broadly for recall. This is independent of the final LLM
-        # context size, which remains capped below.
         rerank_pool = min(search_depth, 50)
         reranked = self.hybrid_search.rerank(rerank_query, merged, top_k=rerank_pool)
         rerank_ranks = self._rank_map(reranked)
@@ -573,7 +566,6 @@ Rules:
 
         joined_context = "\n\n".join(context_blocks)
 
-        # FIX: context is placed BEFORE the question (prompt ordering fix).
         user_prompt = f"""
 Repository: {repo.owner}/{repo.name}
 
@@ -627,120 +619,35 @@ Do not leave the answer unfinished.
         }
 
     def _configure_llm(self):
-        if self.llm_provider == "bedrock":
-            self.llm_client = create_bedrock_runtime_client()
-            self.llm_model = os.getenv(
-                "BEDROCK_LLM_MODEL",
-                "anthropic.claude-3-5-sonnet-20240620-v1:0",
-            )
-            return
-
-        if self.llm_provider == "groq":
-            self.llm_client = OpenAI(
-                api_key=os.getenv("GROQ_API_KEY"),
-                base_url=os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1"),
-            )
-            self.llm_model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
-            return
-
-        if self.llm_provider == "vertex_ai":
-            project = os.getenv("GOOGLE_CLOUD_PROJECT")
-            location = os.getenv("GOOGLE_CLOUD_LOCATION", "global")
-            if not project:
-                raise RuntimeError(
-                    "GOOGLE_CLOUD_PROJECT must be set when using Vertex AI LLMs."
-                )
-
-            self.llm_model = os.getenv("VERTEX_LLM_MODEL", "claude-3-5-sonnet@20240620")
-            if self.llm_model.startswith("claude-"):
-                try:
-                    from anthropic import AnthropicVertex
-                except ImportError as exc:
-                    raise RuntimeError(
-                        "Vertex AI Claude support requires the `anthropic[vertex]` package."
-                    ) from exc
-                self.llm_client = AnthropicVertex(project_id=project, region=location)
-                return
-
-            try:
-                from google import genai
-            except ImportError as exc:
-                raise RuntimeError(
-                    "Vertex AI Gemini support requires the `google-genai` package."
-                ) from exc
-
-            self.llm_client = genai.Client(
-                vertexai=True,
-                project=project,
-                location=location,
-            )
-            return
-
-        raise RuntimeError(f"Unsupported LLM provider: {self.llm_provider}")
+        self.llm_client = boto3.client(
+            "bedrock-runtime",
+            region_name=os.getenv("AWS_REGION", os.getenv("AWS_DEFAULT_REGION", "us-east-1")),
+        )
 
     def _generate_markdown_response(self, system_prompt: str, user_prompt: str) -> tuple[str, str]:
-        if self.llm_provider == "bedrock":
-            text, stop_reason = generate_bedrock_claude_text(
-                self.llm_client,
-                self.llm_model,
-                system_prompt,
-                user_prompt,
-                max_tokens=2200,
-                temperature=0.1,
-            )
-            return self._normalize_markdown_answer(text), stop_reason
-
-        if self.llm_provider == "groq":
-            response = self.llm_client.chat.completions.create(
-                model=self.llm_model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                temperature=0.1,
-                max_tokens=1600,
-            )
-            content = response.choices[0].message.content
-            finish_reason = getattr(response.choices[0], "finish_reason", "") or ""
-            return self._normalize_markdown_answer(content), str(finish_reason)
-
-        if self.llm_provider == "vertex_ai" and self.llm_model.startswith("claude-"):
-            message = self.llm_client.messages.create(
-                model=self.llm_model,
-                system=system_prompt.strip(),
-                max_tokens=2200,
-                temperature=0.1,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": user_prompt.strip(),
-                    }
-                ],
-            )
-            content_blocks = getattr(message, "content", None) or []
-            text = "".join(
-                getattr(block, "text", "") for block in content_blocks if getattr(block, "text", "")
-            )
-            if not text.strip():
-                raise RuntimeError("Vertex AI Claude returned an empty response.")
-            stop_reason = getattr(message, "stop_reason", "") or ""
-            return self._normalize_markdown_answer(text), str(stop_reason)
-
-        response = self.llm_client.models.generate_content(
-            model=self.llm_model,
-            contents=f"{system_prompt.strip()}\n\n{user_prompt.strip()}",
-            config={
+        response = self.llm_client.converse(
+            modelId=self.llm_model,
+            system=[{"text": system_prompt.strip()}],
+            messages=[
+                {
+                    "role": "user",
+                    "content": [{"text": user_prompt.strip()}],
+                }
+            ],
+            inferenceConfig={
                 "temperature": 0.1,
-                "max_output_tokens": 2200,
+                "maxTokens": 2200,
             },
         )
-        if not getattr(response, "text", None):
-            raise RuntimeError("Vertex AI Gemini returned an empty response.")
-        finish_reason = ""
-        candidates = getattr(response, "candidates", None) or []
-        if candidates:
-            finish_reason = str(getattr(candidates[0], "finish_reason", "") or "")
-        return self._normalize_markdown_answer(response.text), finish_reason
+        content_blocks = (
+            response.get("output", {})
+            .get("message", {})
+            .get("content", [])
+        )
+        text = "".join(block.get("text", "") for block in content_blocks)
+        if not text.strip():
+            raise RuntimeError("Bedrock Qwen returned an empty response.")
+        return self._normalize_markdown_answer(text), response.get("stopReason", "")
 
     @staticmethod
     def _normalize_markdown_answer(raw_text: str) -> str:
@@ -773,7 +680,6 @@ Do not leave the answer unfinished.
         if not cleaned:
             return "I found relevant code context, but the model returned an empty response."
 
-        # If the tail still looks truncated, trim back to the last complete sentence or list item
         if CodebaseRAGSystem._looks_incomplete(cleaned):
             sentence_match = re.search(r"(?s)^.*[.!?](?:['\"\)`\]]+)?", cleaned)
             if sentence_match:
@@ -830,14 +736,11 @@ Do not leave the answer unfinished.
             if 1 <= number <= max_source:
                 cited_numbers.add(number)
                 return match.group(0)
-            # Drop citation markers that don't correspond to a real source.
             return ""
 
         cleaned_text = re.sub(r"\[(\d+)\]", _keep_or_drop, answer_text)
         cleaned_text = re.sub(r"[ \t]+([.,;:!?])", r"\1", cleaned_text).strip()
 
-        # If the model didn't cite anything inline, fall back to listing every
-        # retrieved source so the response is still grounded in a traceable way.
         numbers_to_cite = cited_numbers if cited_numbers else set(range(1, max_source + 1))
 
         citations = []

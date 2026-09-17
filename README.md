@@ -20,7 +20,7 @@ I built this project to explore RAG on real codebases instead of documents. Code
 4. Chunks are embedded and stored in Chroma.
 5. Each question runs through semantic vector search and BM25 lexical search.
 6. Results are combined using Reciprocal Rank Fusion.
-7. A cross-encoder reranks the strongest candidates.
+7. Qwen3-Reranker-4B reranks the strongest candidates.
 8. The final context is sent to the LLM.
 9. The LLM generates an answer with inline citations such as `[1]` and `[2]`.
 10. Citations are validated against the retrieved sources before the response is returned.
@@ -97,7 +97,7 @@ The two rankings are combined using Reciprocal Rank Fusion.
 
 ### Reranking
 
-The strongest candidates are passed through a cross-encoder before the final context is selected.
+The strongest candidates are passed through Qwen3-Reranker-4B before the final context is selected.
 
 ```text
 Question
@@ -141,10 +141,9 @@ Question
 * Chroma
 * BM25
 * Reciprocal Rank Fusion
-* Cross-encoder reranking
-* Cohere Embed v3
-* Qwen3 Coder Next through Amazon Bedrock
-* Groq for the hosted version
+* Qwen3-Reranker-4B local reranking
+* Qwen3-Embedding-4B local embeddings
+* Qwen3-Coder-Next through Amazon Bedrock for answer generation
 
 ## Evaluation
 
@@ -164,7 +163,7 @@ There are eight questions per repository covering architecture, implementation l
 
 The evaluation checks whether expected sources are retrieved, how highly the first expected source is ranked, and whether the generated answer is supported by the retrieved context.
 
-The evaluation setup uses **Qwen3 Coder Next through Amazon Bedrock** with Cohere Embed v3 embeddings.
+The evaluation setup uses Qwen3-Coder-Next through Amazon Bedrock, Qwen3-Embedding-4B, and Qwen3-Reranker-4B.
 
 ### Results
 
@@ -197,12 +196,7 @@ source .venv/bin/activate
 
 pip install -r requirements.txt
 
-export LLM_PROVIDER=bedrock
-export EMBEDDING_PROVIDER=bedrock
 export AWS_REGION=us-east-1
-
-export BEDROCK_LLM_MODEL=qwen.qwen3-coder-next
-export BEDROCK_EMBEDDING_MODEL=cohere.embed-english-v3
 
 export CHROMA_PATH=./data/chroma
 
@@ -233,12 +227,8 @@ The frontend is deployed on Vercel.
 
 The FastAPI backend runs as a Docker Space on Hugging Face Spaces and is deployed through GitHub Actions.
 
-The hosted version uses Groq for generation and local `all-MiniLM-L6-v2` embeddings to keep the deployment lightweight.
-
 ```bash
-export LLM_PROVIDER=groq
-export EMBEDDING_PROVIDER=local
-export GROQ_API_KEY=<your-groq-api-key>
+export AWS_REGION=us-east-1
 export CHROMA_PATH=./data/chroma
 ```
 
@@ -247,7 +237,7 @@ export CHROMA_PATH=./data/chroma
 * Repository and session state is mostly kept in memory, so backend restarts require re-indexing.
 * Cloned repositories are deleted after indexing.
 * Large repositories can take time to index.
-* Hybrid retrieval and cross-encoder reranking improve retrieval quality but add latency.
+* Hybrid retrieval and Qwen reranking improve retrieval quality but add latency.
 * Related documentation, tests, or helper code can still rank above the canonical implementation.
 * Retrieval works on chunks independently and does not currently use a dependency or call graph.
 
