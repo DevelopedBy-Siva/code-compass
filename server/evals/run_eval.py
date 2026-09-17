@@ -186,7 +186,6 @@ def run_case(rag_system, repo_id: int, repo_name: str, case: dict):
         "top1_hit": retrieval["top1_hit"],
         "reciprocal_rank": round(retrieval["reciprocal_rank"], 4),
         "expected_source_grounded": int(expected_source_grounded),
-        # Backward-compatible alias for older report consumers.
         "grounded": int(expected_source_grounded),
         "retrieval_debug": retrieval_debug,
         "faithfulness": judge_faithfulness(rag_system, case["question"], result.get("answer", ""), sources),
@@ -208,7 +207,6 @@ def summarize(details):
         "expected_source_grounded_rate": round(
             mean(item["expected_source_grounded"] for item in details), 4
         ),
-        # Backward-compatible alias.
         "grounded_answer_rate": round(mean(item["grounded"] for item in details), 4),
         "faithfulness": round(mean(faith_scores), 4) if faith_scores else None,
         "latency_p95_ms": round(latencies[p95_index], 1),

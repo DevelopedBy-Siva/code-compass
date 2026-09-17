@@ -3,15 +3,14 @@ uvicorn[standard]==0.27.1
 pydantic==2.6.1
 python-dotenv==1.0.1
 
-openai==1.109.1
 boto3==1.40.58
-anthropic[vertex]==0.73.0
-google-genai==1.12.1
 httpx==0.28.1
 numpy==1.26.4
 rank-bm25==0.2.2
 chromadb>=0.5.23
-sentence-transformers==2.7.0
+torch>=2.3.0
+transformers>=4.51.0
+accelerate>=0.30.0
 einops==0.8.1
 tree-sitter==0.21.3
 tree-sitter-languages==1.10.2

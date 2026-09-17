@@ -32,15 +32,11 @@ FastAPI backend for Code Compass, a personal full-stack RAG project that indexes
 
 ## Runtime Configuration
 
-### Local Development (higher-quality experimentation)
-- `LLM_PROVIDER=bedrock` with Claude 3.5 Sonnet
-- `EMBEDDING_PROVIDER=bedrock` with Cohere Embed v3
-- Recommended: `AWS_REGION=us-east-1`, `BEDROCK_LLM_MODEL=anthropic.claude-3-5-sonnet-20240620-v1:0`, `BEDROCK_EMBEDDING_MODEL=cohere.embed-v3:0`
-
-### Production (lower-cost hosting)
-- `LLM_PROVIDER=groq` with Llama 3.1 70B
-- `EMBEDDING_PROVIDER=local` with sentence-transformers/all-MiniLM-L6-v2
-- Required: `GROQ_API_KEY`
+### Model Stack
+- LLM: Amazon Bedrock with Qwen3-Coder-Next
+- Embeddings: local Qwen3-Embedding-4B
+- Reranker: local Qwen3-Reranker-4B
+- Required AWS configuration: `AWS_REGION` or `AWS_DEFAULT_REGION`
 
 ## Chroma Storage
 
