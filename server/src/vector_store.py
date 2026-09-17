@@ -45,6 +45,9 @@ class ChromaVectorStore:
         embeddings = embeddings.astype("float32")
         if embeddings.ndim == 1:
             embeddings = embeddings.reshape(1, -1)
+        if not np.isfinite(embeddings).all():
+            bad_rows = np.where(~np.isfinite(embeddings).all(axis=1))[0][:10].tolist()
+            raise ValueError(f"Embeddings contain NaN or Infinity values at rows: {bad_rows}")
 
         ids = [uuid4().hex for _ in metadata]
         total_points = len(ids)

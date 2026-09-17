@@ -94,13 +94,30 @@ class EmbeddingGenerator:
 
         with torch.inference_mode():
             outputs = self.model(**inputs)
-            token_embeddings = outputs.last_hidden_state
-            mask = inputs["attention_mask"].unsqueeze(-1).to(token_embeddings.dtype)
+            token_embeddings = outputs.last_hidden_state.float()
+            mask = inputs["attention_mask"].unsqueeze(-1).to(dtype=torch.float32)
             summed = (token_embeddings * mask).sum(dim=1)
-            counts = mask.sum(dim=1).clamp(min=1e-9)
+            counts = mask.sum(dim=1).clamp(min=1.0)
             embeddings = F.normalize(summed / counts, p=2, dim=1)
 
-        return embeddings.detach().cpu().float().numpy()
+        embeddings = embeddings.detach().cpu().float().numpy()
+        return self._sanitize_embeddings(embeddings)
+
+    @staticmethod
+    def _sanitize_embeddings(embeddings: np.ndarray) -> np.ndarray:
+        embeddings = np.nan_to_num(
+            embeddings.astype("float32", copy=False),
+            nan=0.0,
+            posinf=0.0,
+            neginf=0.0,
+        )
+        norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+        invalid_rows = (~np.isfinite(norms[:, 0])) | (norms[:, 0] <= 0.0)
+        if np.any(invalid_rows):
+            embeddings[invalid_rows] = 0.0
+            embeddings[invalid_rows, 0] = 1.0
+            norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+        return (embeddings / np.maximum(norms, 1e-12)).astype("float32")
 
     @staticmethod
     def _select_device() -> str:
