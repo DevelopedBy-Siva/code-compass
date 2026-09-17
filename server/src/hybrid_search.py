@@ -1,3 +1,4 @@
+import os
 import re
 import threading
 from collections import defaultdict
@@ -10,6 +11,17 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_./:-]*")
 QWEN_RERANKER_ID = "Qwen/Qwen3-Reranker-4B"
+RERANK_INSTRUCTION = (
+    "Given a codebase question, determine whether the source passage provides "
+    "direct evidence needed to answer it"
+)
+RERANK_PREFIX = (
+    '<|im_start|>system\nJudge whether the Document meets the requirements based on '
+    'the Query and the Instruct provided. Note that the answer can only be "yes" '
+    'or "no".<|im_end|>\n<|im_start|>user\n'
+)
+RERANK_SUFFIX = "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+RERANK_MAX_LENGTH = 8192
 
 
 def tokenize(text: str) -> List[str]:
@@ -40,6 +52,7 @@ def tokenize(text: str) -> List[str]:
 class HybridSearchEngine:
     def __init__(self):
         self.device = self._select_device()
+        self.reranker_model_name = QWEN_RERANKER_ID
         print(
             f"[reranker] Loading {QWEN_RERANKER_ID} on device={self.device}",
             flush=True,
@@ -47,6 +60,7 @@ class HybridSearchEngine:
         self.reranker_tokenizer = AutoTokenizer.from_pretrained(
             QWEN_RERANKER_ID,
             trust_remote_code=True,
+            padding_side="left",
         )
         if self.reranker_tokenizer.pad_token is None:
             self.reranker_tokenizer.pad_token = self.reranker_tokenizer.eos_token
@@ -57,8 +71,17 @@ class HybridSearchEngine:
         ).to(self.device)
         self.reranker.config.pad_token_id = self.reranker_tokenizer.pad_token_id
         self.reranker.eval()
-        self._yes_token_ids = self._label_token_ids("yes")
-        self._no_token_ids = self._label_token_ids("no")
+        self._yes_token_id = self._label_token_id("yes")
+        self._no_token_id = self._label_token_id("no")
+        self._prefix_token_ids = self.reranker_tokenizer.encode(
+            RERANK_PREFIX,
+            add_special_tokens=False,
+        )
+        self._suffix_token_ids = self.reranker_tokenizer.encode(
+            RERANK_SUFFIX,
+            add_special_tokens=False,
+        )
+        self.rerank_batch_size = max(1, int(os.getenv("RAG_RERANK_BATCH_SIZE", "4")))
         self._repo_indexes: Dict[int, dict] = {}
         self._index_lock = threading.Lock()
 
@@ -152,10 +175,13 @@ class HybridSearchEngine:
         if not candidates:
             return []
 
+        documents = [
+            f'{item["file_path"]}\n{item.get("signature") or ""}\n{item["content"]}'
+            for item in candidates
+        ]
+        scores = self._score_relevance_batch(query, documents)
         reranked = []
-        for item in candidates:
-            document = f'{item["file_path"]}\n{item.get("signature") or ""}\n{item["content"]}'
-            score = self._score_relevance(query, document)
+        for item, score in zip(candidates, scores):
             enriched = dict(item)
             enriched["rerank_score"] = score
             reranked.append(enriched)
@@ -164,47 +190,66 @@ class HybridSearchEngine:
         return reranked[:top_k] if top_k is not None else reranked
 
     def _score_relevance(self, query: str, document: str) -> float:
-        prompt = self._build_rerank_prompt(query, document)
-        inputs = self.reranker_tokenizer(
-            prompt,
-            return_tensors="pt",
+        return self._score_relevance_batch(query, [document])[0]
+
+    def _score_relevance_batch(self, query: str, documents: List[str]) -> List[float]:
+        scores = []
+        for start in range(0, len(documents), self.rerank_batch_size):
+            batch = documents[start : start + self.rerank_batch_size]
+            inputs = self._prepare_rerank_inputs(query, batch)
+            with torch.inference_mode():
+                logits = self.reranker(**inputs).logits[:, -1, :]
+
+            label_logits = torch.stack(
+                [logits[:, self._no_token_id], logits[:, self._yes_token_id]],
+                dim=1,
+            )
+            batch_scores = F.softmax(label_logits.float(), dim=1)[:, 1]
+            scores.extend(float(score) for score in batch_scores.detach().cpu())
+        return scores
+
+    def _prepare_rerank_inputs(self, query: str, documents: List[str]):
+        pairs = [self._format_rerank_pair(query, document) for document in documents]
+        content_limit = RERANK_MAX_LENGTH - len(self._prefix_token_ids) - len(
+            self._suffix_token_ids
+        )
+        encoded = self.reranker_tokenizer(
+            pairs,
+            padding=False,
             truncation=True,
-            max_length=8192,
-        ).to(self.device)
-
-        with torch.inference_mode():
-            logits = self.reranker(**inputs).logits[0, -1, :]
-
-        yes_logit = torch.logsumexp(logits[self._yes_token_ids], dim=0)
-        no_logit = torch.logsumexp(logits[self._no_token_ids], dim=0)
-        return float(F.softmax(torch.stack([no_logit, yes_logit]), dim=0)[1].item())
-
-    def _build_rerank_prompt(self, query: str, document: str) -> str:
-        messages = [
-            {
-                "role": "system",
-                "content": "Judge whether the document is relevant to the query. Answer only yes or no.",
-            },
-            {
-                "role": "user",
-                "content": f"Query:\n{query}\n\nDocument:\n{document}\n\nRelevant?",
-            },
+            max_length=content_limit,
+            add_special_tokens=False,
+            return_attention_mask=False,
+        )
+        encoded["input_ids"] = [
+            self._prefix_token_ids + token_ids + self._suffix_token_ids
+            for token_ids in encoded["input_ids"]
         ]
-        return self.reranker_tokenizer.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True,
+        inputs = self.reranker_tokenizer.pad(
+            encoded,
+            padding=True,
+            return_tensors="pt",
+        )
+        return inputs.to(self.device)
+
+    @staticmethod
+    def _format_rerank_pair(query: str, document: str) -> str:
+        return (
+            f"<Instruct>: {RERANK_INSTRUCTION}\n"
+            f"<Query>: {query}\n"
+            f"<Document>: {document}"
         )
 
-    def _label_token_ids(self, label: str) -> torch.Tensor:
-        token_ids = set()
-        for variant in {label, f" {label}", label.capitalize(), f" {label.capitalize()}"}:
-            ids = self.reranker_tokenizer.encode(variant, add_special_tokens=False)
-            if ids:
-                token_ids.add(ids[-1])
-        if not token_ids:
-            raise RuntimeError(f"Could not find reranker token ids for {label!r}.")
-        return torch.tensor(sorted(token_ids), device=self.device)
+    def _label_token_id(self, label: str) -> int:
+        token_id = self.reranker_tokenizer.convert_tokens_to_ids(label)
+        if token_id is None or token_id == self.reranker_tokenizer.unk_token_id:
+            ids = self.reranker_tokenizer.encode(label, add_special_tokens=False)
+            if len(ids) != 1:
+                raise RuntimeError(
+                    f"Reranker label {label!r} must map to exactly one token; got {ids}."
+                )
+            token_id = ids[0]
+        return int(token_id)
 
     @staticmethod
     def _select_device() -> str:

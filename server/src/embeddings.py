@@ -1,3 +1,4 @@
+import os
 import time
 from typing import Callable, List, Optional
 
@@ -7,12 +8,16 @@ import torch.nn.functional as F
 from transformers import AutoModel, AutoTokenizer
 
 QWEN_EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-4B"
+RETRIEVAL_INSTRUCTION = (
+    "Given a codebase question, retrieve source-code and documentation passages "
+    "that provide the most direct evidence for the answer"
+)
 
 
 class EmbeddingGenerator:
     def __init__(self, provider: str = None, model_name: str = None):
         self.model_name = QWEN_EMBEDDING_MODEL
-        self.batch_size = 4
+        self.batch_size = max(1, int(os.getenv("QWEN_EMBEDDING_BATCH_SIZE", "8")))
         self.device = self._select_device()
 
         print(
@@ -23,6 +28,7 @@ class EmbeddingGenerator:
         self.tokenizer = AutoTokenizer.from_pretrained(
             self.model_name,
             trust_remote_code=True,
+            padding_side="left",
         )
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
@@ -41,7 +47,8 @@ class EmbeddingGenerator:
         )
 
     def embed_text(self, text: str) -> np.ndarray:
-        return self.embed_batch([text])[0]
+        query = f"Instruct: {RETRIEVAL_INSTRUCTION}\nQuery: {text}"
+        return self._encode([query])[0]
 
     def embed_batch(
         self,
@@ -94,14 +101,35 @@ class EmbeddingGenerator:
 
         with torch.inference_mode():
             outputs = self.model(**inputs)
-            token_embeddings = outputs.last_hidden_state.float()
-            mask = inputs["attention_mask"].unsqueeze(-1).to(dtype=torch.float32)
-            summed = (token_embeddings * mask).sum(dim=1)
-            counts = mask.sum(dim=1).clamp(min=1.0)
-            embeddings = F.normalize(summed / counts, p=2, dim=1)
+            embeddings = self._last_token_pool(
+                outputs.last_hidden_state,
+                inputs["attention_mask"],
+            ).float()
+            embeddings = F.normalize(embeddings, p=2, dim=1)
 
         embeddings = embeddings.detach().cpu().float().numpy()
         return self._sanitize_embeddings(embeddings)
+
+    @staticmethod
+    def _last_token_pool(
+        last_hidden_state: torch.Tensor,
+        attention_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """Pool Qwen3 embeddings from the final non-padding token.
+
+        Qwen3-Embedding is trained for last-token pooling. Mean pooling makes
+        query and document vectors incompatible with the model's training
+        objective and materially hurts retrieval quality.
+        """
+        if bool(torch.all(attention_mask[:, -1] == 1)):
+            return last_hidden_state[:, -1]
+
+        sequence_lengths = attention_mask.sum(dim=1) - 1
+        batch_indices = torch.arange(
+            last_hidden_state.shape[0],
+            device=last_hidden_state.device,
+        )
+        return last_hidden_state[batch_indices, sequence_lengths]
 
     @staticmethod
     def _sanitize_embeddings(embeddings: np.ndarray) -> np.ndarray:

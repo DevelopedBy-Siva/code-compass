@@ -429,22 +429,28 @@ class CodebaseRAGSystem:
             else top_k * shallow_multiplier
         )
         search_depth = max(top_k, min(search_depth, 120))
+        # Over-fetch before de-duplication. Large repositories often contain
+        # translated copies of the same documentation and many chunks from a
+        # single file; those copies must not consume the candidate budget.
+        fetch_depth = min(max(search_depth * 3, search_depth), 300, len(repo_chunks))
 
         retrieval_query = self._build_retrieval_query(question, normalized_history)
         query_embedding = self.embedder.embed_text(retrieval_query)
 
         semantic_hits = []
-        for score, meta in self.vector_store.search(query_embedding, k=search_depth, repo_filter=repo_id):
+        for score, meta in self.vector_store.search(query_embedding, k=fetch_depth, repo_filter=repo_id):
             serialized = dict(meta)
             serialized["semantic_score"] = score
             semantic_hits.append(serialized)
+        semantic_hits = self._deduplicate_candidates(semantic_hits, search_depth)
 
         lexical_hits = self.hybrid_search.bm25_search(
             repo_chunks,
             retrieval_query,
-            top_k=search_depth,
+            top_k=fetch_depth,
             repo_id=repo_id,
         )
+        lexical_hits = self._deduplicate_candidates(lexical_hits, search_depth)
 
         semantic_hits = self.hybrid_search.normalize_semantic_results(semantic_hits)
         semantic_ranks = self._rank_map(semantic_hits)
@@ -467,15 +473,17 @@ class CodebaseRAGSystem:
 
         rerank_query = retrieval_query if question_intent in deep_search_intents else question
 
-        rerank_pool = min(search_depth, 50)
+        rerank_pool = min(len(merged), max(50, top_k * 8))
         reranked = self.hybrid_search.rerank(rerank_query, merged, top_k=rerank_pool)
         rerank_ranks = self._rank_map(reranked)
 
         prioritized = self._prioritize_results(
-            question, retrieval_query, reranked, top_k=top_k
+            question, retrieval_query, reranked, top_k=rerank_pool
         )
+        prioritized_ranks = self._rank_map(prioritized)
 
-        final_top_k = min(top_k, 5)
+        configured_source_limit = int(os.getenv("RAG_FINAL_SOURCE_LIMIT", str(top_k)))
+        final_top_k = max(1, min(top_k, configured_source_limit))
         final_sources = self._select_answer_sources(
             question, prioritized, top_k=final_top_k
         )
@@ -499,6 +507,7 @@ class CodebaseRAGSystem:
                         "fused_rank": fused_ranks.get(chunk_id),
                         "path_rank": path_ranks.get(chunk_id),
                         "rerank_rank": rerank_ranks.get(chunk_id),
+                        "prioritized_rank": prioritized_ranks.get(chunk_id),
                         "final_rank": final_ranks.get(chunk_id),
                         "semantic_score": item.get("semantic_score"),
                         "bm25_score": item.get("bm25_score"),
@@ -961,6 +970,46 @@ Do not leave the answer unfinished.
             return "/".join(parts[:2])
         return parts[0]
 
+    @staticmethod
+    def _translated_document_family(file_path: str) -> Optional[str]:
+        """Return a locale-independent path for translated documentation."""
+        normalized = (file_path or "").lower().strip("/")
+        match = re.match(
+            r"^docs/([a-z]{2,3}(?:-[a-z0-9]{2,8})?)/docs/(.+)$",
+            normalized,
+        )
+        if match:
+            return f"docs/{match.group(2)}"
+        return None
+
+    @classmethod
+    def _deduplicate_candidates(cls, results: List[dict], top_k: int) -> List[dict]:
+        """Limit file and translation-family flooding while preserving rank."""
+        selected = []
+        counts = {}
+        translated_slots = {}
+        for item in results:
+            file_path = (item.get("file_path") or "").lower()
+            translated_family = cls._translated_document_family(file_path)
+            if translated_family in translated_slots:
+                slot = translated_slots[translated_family]
+                current_path = (selected[slot].get("file_path") or "").lower()
+                if "/en/docs/" in file_path and "/en/docs/" not in current_path:
+                    selected[slot] = item
+                continue
+
+            if len(selected) >= top_k:
+                continue
+            key = translated_family or file_path
+            limit = 1 if translated_family else 3
+            if counts.get(key, 0) >= limit:
+                continue
+            counts[key] = counts.get(key, 0) + 1
+            selected.append(item)
+            if translated_family:
+                translated_slots[translated_family] = len(selected) - 1
+        return selected
+
     def _merge_ranked_candidates(
         self,
         ranked_results: List[dict],
@@ -977,7 +1026,11 @@ Do not leave the answer unfinished.
 
         for rank, item in enumerate(path_results, start=1):
             existing = merged.get(item["id"])
-            path_bonus = 1.0 / (20 + rank)
+            # Path matching is a useful supporting signal, but it is much
+            # noisier than semantic/BM25 retrieval. Keep it below one full RRF
+            # channel so a generic path hit cannot outrank a candidate found
+            # strongly by both primary retrievers.
+            path_bonus = 0.5 / (60 + rank)
             if existing is None:
                 enriched = dict(item)
                 enriched["rrf_score"] = float(enriched.get("rrf_score", 0.0)) + path_bonus
@@ -1060,7 +1113,7 @@ Do not leave the answer unfinished.
             ),
             reverse=True,
         )
-        return scored[:top_k]
+        return self._deduplicate_candidates(scored, top_k)
 
     def _prioritize_results(
         self,
@@ -1213,6 +1266,21 @@ Do not leave the answer unfinished.
             return "tests"
         if has_any({"error", "invalid", "conflict", "raises", "guard against"}):
             return "error_handling"
+        if (
+            has_any(
+                {
+                    "flow",
+                    "across",
+                    "across files",
+                    "connect",
+                    "code path",
+                    "lifecycle",
+                    "reach",
+                }
+            )
+            or (has_any({"request", "incoming request"}) and has_any({"response"}))
+        ):
+            return "cross_file"
         if has_any(
             {
                 "api",
@@ -1251,8 +1319,6 @@ Do not leave the answer unfinished.
             }
         ):
             return "setup"
-        if has_any({"flow", "across", "across files", "connect", "code path"}):
-            return "cross_file"
         if has_any(
             {
                 "behavior",
@@ -1536,6 +1602,21 @@ Do not leave the answer unfinished.
                 score += 4
             if any(token in file_path for token in {"api", "route", "router", "controller"}):
                 score += 2
+        translated_family = self._translated_document_family(file_path)
+        if translated_family:
+            # Localized copies should not crowd canonical implementation or
+            # English/top-level documentation out of a small context window.
+            score -= 2 if intent in {"docs", "overview"} else 7
+
+        is_test_path = (
+            file_path.startswith("tests/")
+            or "/tests/" in file_path
+            or basename.startswith("test_")
+            or ".test." in basename
+            or ".spec." in basename
+        )
+        if is_test_path and intent != "tests":
+            score -= 5
         if intent in {"implementation", "cross_file"}:
             if not self._is_doc_source(item):
                 score += 2

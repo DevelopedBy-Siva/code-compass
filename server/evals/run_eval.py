@@ -25,6 +25,11 @@ EVAL_SET_PATH = Path(
 )
 EVAL_OUTPUT_PATH = os.getenv("CODEBASE_RAG_EVAL_OUTPUT")
 ENABLE_FAITHFULNESS = os.getenv("CODEBASE_RAG_ENABLE_FAITHFULNESS", "1") == "1"
+EVAL_REPO_IDS = {
+    value.strip().lower()
+    for value in os.getenv("CODEBASE_RAG_EVAL_REPOS", "").split(",")
+    if value.strip()
+}
 
 
 def log(message: str):
@@ -153,6 +158,22 @@ def compute_retrieval_metrics(expected_sources, actual_sources):
     }
 
 
+def compute_debug_stage_metrics(expected_sources, retrieval_debug, rank_key, rank_limit=None):
+    ranked = sorted(
+        (
+            (item.get(rank_key), item.get("file_path", ""))
+            for item in retrieval_debug
+            if item.get(rank_key) is not None
+            and (rank_limit is None or item.get(rank_key) <= rank_limit)
+        ),
+        key=lambda pair: pair[0],
+    )
+    return compute_retrieval_metrics(
+        expected_sources,
+        [file_path for _, file_path in ranked],
+    )
+
+
 def keyword_hits(answer: str, keywords):
     if not keywords:
         return 0, 0
@@ -266,6 +287,36 @@ def run_case(rag_system, repo_id: int, repo_name: str, case: dict):
             case.get("expected_sources", []),
         )
 
+    expected_sources = case.get("expected_sources", [])
+    stage_metrics = {
+        stage: compute_debug_stage_metrics(
+            expected_sources,
+            retrieval_debug,
+            rank_key,
+            rank_limit,
+        )
+        for stage, rank_key, rank_limit in (
+            ("semantic", "semantic_rank", None),
+            ("lexical", "bm25_rank", None),
+            ("fused", "fused_rank", None),
+            ("path", "path_rank", None),
+            ("reranker", "rerank_rank", None),
+            ("reranker_top_k", "rerank_rank", TOP_K),
+            ("prioritized", "prioritized_rank", None),
+            ("prioritized_top_k", "prioritized_rank", TOP_K),
+        )
+    }
+    candidate_retrieval_hit = int(
+        any(
+            item.get("expected_source")
+            and any(
+                item.get(rank_key) is not None
+                for rank_key in ("semantic_rank", "bm25_rank", "path_rank")
+            )
+            for item in retrieval_debug
+        )
+    )
+
     return {
         "id": case.get("id", case["question"]),
         "repo": repo_name,
@@ -278,6 +329,15 @@ def run_case(rag_system, repo_id: int, repo_name: str, case: dict):
         "retrieval_hit": retrieval["retrieval_hit"],
         "top1_hit": retrieval["top1_hit"],
         "reciprocal_rank": round(retrieval["reciprocal_rank"], 4),
+        "candidate_retrieval_hit": candidate_retrieval_hit,
+        **{
+            f"{stage}_hit": metrics["retrieval_hit"]
+            for stage, metrics in stage_metrics.items()
+        },
+        **{
+            f"{stage}_reciprocal_rank": round(metrics["reciprocal_rank"], 4)
+            for stage, metrics in stage_metrics.items()
+        },
         "expected_source_grounded": int(expected_source_grounded),
         "grounded": int(expected_source_grounded),
         "retrieval_debug": retrieval_debug,
@@ -294,7 +354,22 @@ def summarize(details):
     faith_scores = [item["faithfulness"] for item in details if item["faithfulness"] is not None]
     return {
         "case_count": len(details),
+        "candidate_retrieval_hit_rate": round(
+            mean(item["candidate_retrieval_hit"] for item in details), 4
+        ),
+        "semantic_hit_rate": round(mean(item["semantic_hit"] for item in details), 4),
+        "lexical_hit_rate": round(mean(item["lexical_hit"] for item in details), 4),
+        "fused_hit_rate": round(mean(item["fused_hit"] for item in details), 4),
+        "reranker_hit_rate": round(mean(item["reranker_hit"] for item in details), 4),
+        "reranker_top_k_hit_rate": round(
+            mean(item["reranker_top_k_hit"] for item in details), 4
+        ),
+        "prioritized_hit_rate": round(mean(item["prioritized_hit"] for item in details), 4),
+        "prioritized_top_k_hit_rate": round(
+            mean(item["prioritized_top_k_hit"] for item in details), 4
+        ),
         "retrieval_hit_rate": round(mean(item["retrieval_hit"] for item in details), 4),
+        "final_context_hit_rate": round(mean(item["retrieval_hit"] for item in details), 4),
         "top1_hit_rate": round(mean(item["top1_hit"] for item in details), 4),
         "mrr": round(mean(item["reciprocal_rank"] for item in details), 4),
         "expected_source_grounded_rate": round(
@@ -328,6 +403,20 @@ def run():
     if errors:
         raise RuntimeError("Eval set validation failed: " + "; ".join(errors))
 
+    if EVAL_REPO_IDS:
+        available_ids = {repo["id"].lower() for repo in repositories}
+        unknown_ids = EVAL_REPO_IDS - available_ids
+        if unknown_ids:
+            raise RuntimeError(
+                "Unknown CODEBASE_RAG_EVAL_REPOS values: "
+                + ", ".join(sorted(unknown_ids))
+                + ". Available repository ids: "
+                + ", ".join(sorted(available_ids))
+            )
+        repositories = [
+            repo for repo in repositories if repo["id"].lower() in EVAL_REPO_IDS
+        ]
+
     total_cases = sum(len(repo["cases"]) for repo in repositories)
     log(f"Loaded eval set: {len(repositories)} repositories, {total_cases} cases")
 
@@ -358,7 +447,19 @@ def run():
         "config": {
             "llm_provider": rag_system.llm_provider,
             "llm_model": rag_system.llm_model,
+            "embedding_model": rag_system.embedder.model_name,
+            "embedding_dimension": rag_system.embedder.get_embedding_dim(),
+            "reranker_model": rag_system.hybrid_search.reranker_model_name,
+            "embedding_batch_size": rag_system.embedder.batch_size,
+            "reranker_batch_size": rag_system.hybrid_search.rerank_batch_size,
             "top_k": TOP_K,
+            "final_source_limit": max(
+                1,
+                min(
+                    TOP_K,
+                    int(os.getenv("RAG_FINAL_SOURCE_LIMIT", str(TOP_K))),
+                ),
+            ),
             "eval_set": str(EVAL_SET_PATH),
             "repositories": [
                 {"id": repo["id"], "name": repo["name"], "github_url": repo["github_url"]}

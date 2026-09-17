@@ -11,7 +11,13 @@ from chromadb.config import Settings
 class ChromaVectorStore:
     def __init__(self, embedding_dim: int, index_path: str = None, persist: bool = True):
         self.embedding_dim = embedding_dim
-        self.collection_name = os.getenv("CHROMA_COLLECTION", "repo_qa_chunks")
+        # The v2 collection uses Qwen3's required last-token pooling. Vectors
+        # produced by the previous mean-pooling implementation are not
+        # compatible and must never be mixed with the corrected query vectors.
+        self.collection_name = os.getenv(
+            "CHROMA_COLLECTION",
+            "repo_qa_chunks_qwen3_last_token_v2",
+        )
         self.upsert_batch_size = max(1, int(os.getenv("CHROMA_UPSERT_BATCH_SIZE", "64")))
         self.persist_path = os.getenv("CHROMA_PATH", index_path or "./data/chroma")
         self.persist = persist

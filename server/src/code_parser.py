@@ -134,6 +134,7 @@ class CodeParser:
     def chunk_file(self, file_path: str, repo_root: str) -> List[Dict]:
         language = self.detect_language(file_path)
         source = Path(file_path).read_text(encoding="utf-8", errors="ignore")
+        source_bytes = source.encode("utf-8")
         relative_path = str(Path(file_path).resolve().relative_to(Path(repo_root).resolve()))
 
         if not source.strip():
@@ -143,7 +144,7 @@ class CodeParser:
         if parser is None:
             return self._fallback_chunks(source, relative_path, language)
 
-        tree = parser.parse(bytes(source, "utf-8"))
+        tree = parser.parse(source_bytes)
         lines = source.splitlines()
         chunks = []
         capture_types = SYMBOL_NODE_TYPES.get(language, set())
@@ -153,12 +154,12 @@ class CodeParser:
             if node.type in capture_types:
                 if node.type in container_types:
                     overview = self._build_container_overview(
-                        node, source, lines, relative_path, language, context_name, capture_types
+                        node, source_bytes, lines, relative_path, language, context_name, capture_types
                     )
                     if overview:
                         chunks.append(overview)
 
-                    own_name = self._extract_own_name(node, source)
+                    own_name = self._extract_own_name(node, source_bytes)
                     nested_context = own_name
                     if context_name and own_name:
                         nested_context = f"{context_name}.{own_name}"
@@ -169,7 +170,7 @@ class CodeParser:
                         visit(child, nested_context)
                     return
 
-                chunk = self._build_chunk(node, source, lines, relative_path, language, context_name)
+                chunk = self._build_chunk(node, source_bytes, lines, relative_path, language, context_name)
                 if chunk:
                     chunks.append(chunk)
                     return
@@ -182,7 +183,7 @@ class CodeParser:
             chunks = self._fallback_chunks(source, relative_path, language)
 
         file_overview = self._build_file_overview(
-            tree.root_node, source, lines, relative_path, language, chunks
+            tree.root_node, source_bytes, lines, relative_path, language, chunks
         )
         if file_overview:
             chunks.insert(0, file_overview)
@@ -192,7 +193,7 @@ class CodeParser:
     def _build_chunk(
         self,
         node,
-        source: str,
+        source_bytes: bytes,
         lines: List[str],
         relative_path: str,
         language: str,
@@ -204,7 +205,7 @@ class CodeParser:
         if len(snippet.splitlines()) < 2:
             return None
 
-        own_name = self._extract_own_name(node, source)
+        own_name = self._extract_own_name(node, source_bytes)
         qualified_name = own_name
         if context_name and own_name:
             qualified_name = f"{context_name}.{own_name}"
@@ -238,7 +239,7 @@ class CodeParser:
     def _build_container_overview(
         self,
         node,
-        source: str,
+        source_bytes: bytes,
         lines: List[str],
         relative_path: str,
         language: str,
@@ -251,7 +252,7 @@ class CodeParser:
         if not body_lines:
             return None
 
-        own_name = self._extract_own_name(node, source)
+        own_name = self._extract_own_name(node, source_bytes)
         qualified_name = own_name
         if context_name and own_name:
             qualified_name = f"{context_name}.{own_name}"
@@ -271,7 +272,7 @@ class CodeParser:
             content = content[:MAX_OVERVIEW_CHARS].rstrip()
             truncated_body = True
 
-        member_names = self._collect_member_names(node, source, capture_types)
+        member_names = self._collect_member_names(node, source_bytes, capture_types)
         members_line = ""
         if member_names:
             shown = member_names[:MAX_MEMBERS_LISTED]
@@ -309,7 +310,7 @@ class CodeParser:
             },
         }
 
-    def _build_file_overview(self, root_node, source: str, lines: List[str], relative_path: str, language: str, symbol_chunks: List[Dict]) -> Optional[Dict]:
+    def _build_file_overview(self, root_node, source_bytes: bytes, lines: List[str], relative_path: str, language: str, symbol_chunks: List[Dict]) -> Optional[Dict]:
         if language == "text":
             return None
         path = Path(relative_path)
@@ -318,7 +319,7 @@ class CodeParser:
         filename = path.name
         component = parts[1] if len(parts) >= 2 and parts[0] in {"packages", "apps"} else (parts[-2] if len(parts) >= 2 else "")
         role = self._infer_file_role(relative_path)
-        imports, exports, export_targets = self._extract_module_edges(root_node, source)
+        imports, exports, export_targets = self._extract_module_edges(root_node, source_bytes)
         symbols, seen = [], set()
         for chunk in symbol_chunks:
             name = chunk.get("symbol_name")
@@ -355,10 +356,10 @@ class CodeParser:
                 return role
         return "source module"
 
-    def _extract_module_edges(self, root_node, source: str):
+    def _extract_module_edges(self, root_node, source_bytes: bytes):
         imports, exports, targets = [], [], []
         for child in root_node.children:
-            text = source[child.start_byte:child.end_byte].strip()
+            text = source_bytes[child.start_byte:child.end_byte].decode("utf-8", errors="ignore").strip()
             if not text: continue
             if child.type == "import_statement" or text.startswith("import "):
                 target = self._module_target(text)
@@ -391,7 +392,7 @@ class CodeParser:
         if statement.startswith("export *"): names.append("*")
         return names
 
-    def _collect_member_names(self, node, source: str, capture_types: set) -> List[str]:
+    def _collect_member_names(self, node, source_bytes: bytes, capture_types: set) -> List[str]:
         """Collect names of direct member symbols (methods/fields) inside a
         container without descending into nested containers, so a class's
         member list doesn't pick up grandchildren from an inner class."""
@@ -401,7 +402,7 @@ class CodeParser:
         def walk(current):
             for child in current.children:
                 if child.type in capture_types:
-                    name = self._extract_own_name(child, source)
+                    name = self._extract_own_name(child, source_bytes)
                     if name and name not in seen:
                         seen.add(name)
                         names.append(name)
@@ -413,21 +414,25 @@ class CodeParser:
         return names
 
     @staticmethod
-    def _extract_own_name(node, source: str) -> Optional[str]:
+    def _extract_own_name(node, source_bytes: bytes) -> Optional[str]:
         name_node = node.child_by_field_name("name")
         if name_node is not None:
-            candidate = source[name_node.start_byte : name_node.end_byte].strip()
+            candidate = source_bytes[name_node.start_byte : name_node.end_byte].decode(
+                "utf-8", errors="ignore"
+            ).strip()
             if candidate:
                 return candidate
-        return CodeParser._find_identifier(node, source)
+        return CodeParser._find_identifier(node, source_bytes)
 
     @staticmethod
-    def _find_identifier(node, source: str) -> Optional[str]:
+    def _find_identifier(node, source_bytes: bytes) -> Optional[str]:
         stack = list(node.children)
         while stack:
             current = stack.pop(0)
             if current.type in IDENTIFIER_TYPES:
-                return source[current.start_byte : current.end_byte].strip()
+                return source_bytes[current.start_byte : current.end_byte].decode(
+                    "utf-8", errors="ignore"
+                ).strip()
             stack.extend(current.children)
         return None
 
