@@ -82,22 +82,35 @@ class ChromaVectorStore:
         return ids
 
     def get_repository_chunks(self, repo_id: int) -> List[dict]:
-        results = self.collection.get(
-            where={"repository_id": repo_id},
-            include=["documents", "metadatas"],
-        )
-        ids = results.get("ids") or []
-        documents = results.get("documents") or []
-        metadatas = results.get("metadatas") or []
-
         chunks = []
-        for idx, document, meta in zip(ids, documents, metadatas):
-            payload = dict(meta or {})
-            payload["id"] = payload.get("id") or idx
-            payload["repository_id"] = repo_id
-            payload["content"] = document or payload.get("content") or ""
-            payload.setdefault("searchable_text", self._build_searchable_text(payload))
-            chunks.append(payload)
+        offset = 0
+        limit = self.upsert_batch_size
+
+        while True:
+            results = self.collection.get(
+                where={"repository_id": repo_id},
+                include=["documents", "metadatas"],
+                limit=limit,
+                offset=offset,
+            )
+            ids = results.get("ids") or []
+            documents = results.get("documents") or []
+            metadatas = results.get("metadatas") or []
+            if not ids:
+                break
+
+            for idx, document, meta in zip(ids, documents, metadatas):
+                payload = dict(meta or {})
+                payload["id"] = payload.get("id") or idx
+                payload["repository_id"] = repo_id
+                payload["content"] = document or payload.get("content") or ""
+                payload.setdefault("searchable_text", self._build_searchable_text(payload))
+                chunks.append(payload)
+
+            if len(ids) < limit:
+                break
+            offset += limit
+
         return chunks
 
     def search(
