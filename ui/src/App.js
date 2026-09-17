@@ -695,7 +695,7 @@ function getConfidencePercentValue(source) {
 
   const rerank = source?.rerank_score;
   if (typeof rerank === "number") {
-    // Soften raw cross-encoder scores into a demo-friendly percentage range.
+    // Soften raw Qwen3 reranker scores into a demo-friendly percentage range.
     const normalized = 1 / (1 + Math.exp(-(rerank / 4)));
     return Math.max(8, Math.min(99, Math.round(normalized * 100)));
   }

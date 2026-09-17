@@ -20,7 +20,7 @@ I built this project to explore RAG on real codebases instead of documents. Code
 4. Chunks are embedded and stored in Chroma.
 5. Each question runs through semantic vector search and BM25 lexical search.
 6. Results are combined using Reciprocal Rank Fusion.
-7. A cross-encoder reranks the strongest candidates.
+7. A local Qwen3 reranker reranks the strongest candidates.
 8. The final context is sent to the LLM.
 9. The LLM generates an answer with inline citations such as `[1]` and `[2]`.
 10. Citations are validated against the retrieved sources before the response is returned.
@@ -97,7 +97,8 @@ The two rankings are combined using Reciprocal Rank Fusion.
 
 ### Reranking
 
-The strongest candidates are passed through a cross-encoder before the final context is selected.
+The strongest candidates are passed through the 4-bit local
+`Qwen/Qwen3-Reranker-4B` model before the final context is selected.
 
 ```text
 Question
@@ -110,7 +111,7 @@ Question
          RRF
           │
           ▼
-   Cross-encoder
+ Qwen3 reranker
           │
           ▼
     Final context
@@ -141,10 +142,9 @@ Question
 * Chroma
 * BM25
 * Reciprocal Rank Fusion
-* Cross-encoder reranking
-* Cohere Embed v3
+* Qwen3-Embedding-4B (local, 4-bit)
+* Qwen3-Reranker-4B (local, 4-bit)
 * Qwen3 Coder Next through Amazon Bedrock
-* Groq for the hosted version
 
 ## Evaluation
 
@@ -164,9 +164,16 @@ There are eight questions per repository covering architecture, implementation l
 
 The evaluation checks whether expected sources are retrieved, how highly the first expected source is ranked, and whether the generated answer is supported by the retrieved context.
 
-The evaluation setup uses **Qwen3 Coder Next through Amazon Bedrock** with Cohere Embed v3 embeddings.
+The evaluation setup uses **Qwen3 Coder Next through Amazon Bedrock** for answer
+generation, with local Qwen3-Embedding-4B embeddings and Qwen3-Reranker-4B
+reranking.
 
 ### Results
+
+The figures below are the existing baseline from before the retrieval-model
+migration. Re-index the evaluation repositories and rerun the harness to establish
+the Qwen3 baseline; embedding-space results are not directly comparable across the
+migration.
 
 | Metric                 |    Result |
 | ---------------------- | --------: |
@@ -197,17 +204,22 @@ source .venv/bin/activate
 
 pip install -r requirements.txt
 
-export LLM_PROVIDER=bedrock
-export EMBEDDING_PROVIDER=bedrock
-export AWS_REGION=us-east-1
-
-export BEDROCK_LLM_MODEL=qwen.qwen3-coder-next
-export BEDROCK_EMBEDDING_MODEL=cohere.embed-english-v3
-
-export CHROMA_PATH=./data/chroma
+cp .env.example .env
 
 python server_app.py
 ```
+
+The embedding and reranking weights download from Hugging Face on first use.
+Both models are loaded locally with 4-bit NF4 quantization and need approximately
+5–6 GB of free accelerator memory when loaded together. The default configuration
+uses `QWEN_DEVICE_MAP=auto`; reduce the two batch sizes in `.env` if inference runs
+out of memory. Amazon Bedrock credentials are still required for Qwen3 Coder Next.
+
+Qwen3-Embedding-4B produces 2560-dimensional vectors in a different embedding
+space from Cohere Embed v3. Delete any existing Chroma collection and re-index all
+repositories after upgrading. Code Compass clears and rebuilds its collection on
+normal server startup, but any separately managed persistent index must also be
+rebuilt.
 
 The API runs at `http://localhost:8000`.
 
@@ -231,15 +243,10 @@ The frontend runs at `http://localhost:3000`.
 
 The frontend is deployed on Vercel.
 
-The FastAPI backend runs as a Docker Space on Hugging Face Spaces and is deployed through GitHub Actions.
-
-The hosted version uses Groq for generation and local `all-MiniLM-L6-v2` embeddings to keep the deployment lightweight.
+The FastAPI backend runs as a Docker Space on Hugging Face Spaces and is deployed through GitHub Actions. Its host must have enough accelerator memory for both local Qwen3 retrieval models.
 
 ```bash
-export LLM_PROVIDER=groq
-export EMBEDDING_PROVIDER=local
-export GROQ_API_KEY=<your-groq-api-key>
-export CHROMA_PATH=./data/chroma
+cp .env.example .env
 ```
 
 ## Tradeoffs
@@ -247,7 +254,8 @@ export CHROMA_PATH=./data/chroma
 * Repository and session state is mostly kept in memory, so backend restarts require re-indexing.
 * Cloned repositories are deleted after indexing.
 * Large repositories can take time to index.
-* Hybrid retrieval and cross-encoder reranking improve retrieval quality but add latency.
+* Hybrid retrieval and Qwen3 reranking improve retrieval quality but add latency.
+* Loading both local 4-bit retrieval models requires approximately 5–6 GB of free memory.
 * Related documentation, tests, or helper code can still rank above the canonical implementation.
 * Retrieval works on chunks independently and does not currently use a dependency or call graph.
 

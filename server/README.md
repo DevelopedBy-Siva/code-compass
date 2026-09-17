@@ -14,7 +14,7 @@ FastAPI backend for Code Compass, a personal full-stack RAG project that indexes
 
 - End-to-end AI application design, not just a prompt wrapper
 - Backend API design with FastAPI, Pydantic validation, and session-scoped state
-- Code-aware retrieval using tree-sitter chunking, vector search, BM25, rank fusion, and reranking
+- Code-aware retrieval using tree-sitter chunking, Qwen3 embeddings, BM25, rank fusion, and Qwen3 reranking
 - Grounded answer generation with file-level citations
 - Deployment-aware tradeoffs for cost, model choice, and free-tier infrastructure
 - Evaluation workflow prepared for retrieval and answer-quality metrics
@@ -32,15 +32,18 @@ FastAPI backend for Code Compass, a personal full-stack RAG project that indexes
 
 ## Runtime Configuration
 
-### Local Development (higher-quality experimentation)
-- `LLM_PROVIDER=bedrock` with Claude 3.5 Sonnet
-- `EMBEDDING_PROVIDER=bedrock` with Cohere Embed v3
-- Recommended: `AWS_REGION=us-east-1`, `BEDROCK_LLM_MODEL=anthropic.claude-3-5-sonnet-20240620-v1:0`, `BEDROCK_EMBEDDING_MODEL=cohere.embed-v3:0`
+Copy `.env.example` to `.env`. Answer generation remains on Amazon Bedrock with
+Qwen3 Coder Next. Retrieval always uses these local models:
 
-### Production (lower-cost hosting)
-- `LLM_PROVIDER=groq` with Llama 3.1 70B
-- `EMBEDDING_PROVIDER=local` with sentence-transformers/all-MiniLM-L6-v2
-- Required: `GROQ_API_KEY`
+- `QWEN_EMBEDDING_MODEL=Qwen/Qwen3-Embedding-4B`
+- `QWEN_RERANKER_MODEL=Qwen/Qwen3-Reranker-4B`
+- `QWEN_DEVICE_MAP=auto`
+- `QWEN_COMPUTE_DTYPE=float16`
+
+Both retrieval models use 4-bit NF4 quantization and require approximately 5–6 GB
+of free accelerator memory when loaded together. They download from Hugging Face
+on first startup. `EMBEDDING_BATCH_SIZE` and `RERANKER_BATCH_SIZE` default to 2 and
+can be reduced if memory is constrained.
 
 ## Chroma Storage
 
@@ -51,6 +54,11 @@ Configuration:
 - `CHROMA_PATH=./data/chroma`
 - `CHROMA_COLLECTION=repo_qa_chunks`
 - `CHROMA_UPSERT_BATCH_SIZE=64`
+
+Qwen3-Embedding-4B stores 2560-dimensional vectors. Its vector space is not
+compatible with the previous Cohere embeddings, so existing Chroma data must be
+deleted and every repository re-indexed after this upgrade. The normal application
+startup rebuild performs this reset automatically.
 
 ## Metrics
 

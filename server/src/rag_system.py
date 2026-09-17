@@ -55,7 +55,7 @@ class CodebaseRAGSystem:
         )
         self.hybrid_search = HybridSearchEngine(
             reranker_model=os.getenv(
-                "RERANKER_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2"
+                "QWEN_RERANKER_MODEL", "Qwen/Qwen3-Reranker-4B"
             )
         )
         self.app_env = os.getenv("APP_ENV", os.getenv("ENVIRONMENT", "local")).lower()

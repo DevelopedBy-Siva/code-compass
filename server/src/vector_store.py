@@ -10,6 +10,10 @@ from chromadb.config import Settings
 
 class ChromaVectorStore:
     def __init__(self, embedding_dim: int, index_path: str = None, persist: bool = True):
+        if embedding_dim != 2560:
+            raise ValueError(
+                f"Qwen3-Embedding-4B requires 2560-dimensional vectors, got {embedding_dim}."
+            )
         self.embedding_dim = embedding_dim
         self.collection_name = os.getenv("CHROMA_COLLECTION", "repo_qa_chunks")
         self.upsert_batch_size = max(1, int(os.getenv("CHROMA_UPSERT_BATCH_SIZE", "64")))
@@ -35,7 +39,11 @@ class ChromaVectorStore:
         return self.client.get_or_create_collection(
             name=self.collection_name,
             embedding_function=None,
-            metadata={"hnsw:space": "cosine"},
+            metadata={
+                "hnsw:space": "cosine",
+                "embedding_dimension": self.embedding_dim,
+                "embedding_model": "Qwen/Qwen3-Embedding-4B",
+            },
         )
 
     def add_embeddings(self, embeddings: np.ndarray, metadata: List[dict]) -> List[str]:
@@ -45,6 +53,11 @@ class ChromaVectorStore:
         embeddings = embeddings.astype("float32")
         if embeddings.ndim == 1:
             embeddings = embeddings.reshape(1, -1)
+        if embeddings.shape[1] != self.embedding_dim:
+            raise ValueError(
+                f"Expected {self.embedding_dim}-dimensional embeddings, got "
+                f"{embeddings.shape[1]}."
+            )
 
         ids = [uuid4().hex for _ in metadata]
         total_points = len(ids)
@@ -87,6 +100,11 @@ class ChromaVectorStore:
         if query_embedding.ndim == 1:
             query_embedding = query_embedding.reshape(1, -1)
         query_embedding = query_embedding.astype("float32")
+        if query_embedding.shape[1] != self.embedding_dim:
+            raise ValueError(
+                f"Expected a {self.embedding_dim}-dimensional query embedding, got "
+                f"{query_embedding.shape[1]}."
+            )
 
         where = {"repository_id": repo_filter} if repo_filter is not None else None
         results = self.collection.query(

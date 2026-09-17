@@ -1,12 +1,120 @@
+import os
 import re
 import threading
+import time
 from collections import defaultdict
 from typing import Dict, List, Optional
 
 from rank_bm25 import BM25Okapi
-from sentence_transformers import CrossEncoder
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
 TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_./:-]*")
+DEFAULT_RERANKER_MODEL = "Qwen/Qwen3-Reranker-4B"
+DEFAULT_RERANK_INSTRUCTION = (
+    "Given a question about a software repository, retrieve relevant source code "
+    "passages that answer the question"
+)
+
+
+class Qwen3Reranker:
+    def __init__(self, model_name: str = DEFAULT_RERANKER_MODEL):
+        self.model_name = model_name
+        self.batch_size = max(1, int(os.getenv("RERANKER_BATCH_SIZE", "2")))
+        self.max_length = int(os.getenv("QWEN_RERANKER_MAX_LENGTH", "8192"))
+        self.instruction = os.getenv(
+            "QWEN_RERANKER_INSTRUCTION", DEFAULT_RERANK_INSTRUCTION
+        ).strip()
+        self.prefix = (
+            '<|im_start|>system\nJudge whether the Document meets the requirements '
+            'based on the Query and the Instruct provided. Note that the answer can '
+            'only be "yes" or "no".<|im_end|>\n<|im_start|>user\n'
+        )
+        self.suffix = (
+            "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+        )
+
+        print(f"[reranker] Loading 4-bit local model={model_name}", flush=True)
+        started_at = time.perf_counter()
+        compute_dtype = os.getenv("QWEN_COMPUTE_DTYPE", "float16").lower()
+        dtype_map = {
+            "float16": torch.float16,
+            "bfloat16": torch.bfloat16,
+            "float32": torch.float32,
+        }
+        if compute_dtype not in dtype_map:
+            raise ValueError(
+                "QWEN_COMPUTE_DTYPE must be float16, bfloat16, or float32."
+            )
+        quantization_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_compute_dtype=dtype_map[compute_dtype],
+        )
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            model_name,
+            padding_side="left",
+        )
+        self.model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            device_map=os.getenv("QWEN_DEVICE_MAP", "auto"),
+            quantization_config=quantization_config,
+        ).eval()
+        self.false_token_id = self.tokenizer.convert_tokens_to_ids("no")
+        self.true_token_id = self.tokenizer.convert_tokens_to_ids("yes")
+        self.prefix_tokens = self.tokenizer.encode(
+            self.prefix, add_special_tokens=False
+        )
+        self.suffix_tokens = self.tokenizer.encode(
+            self.suffix, add_special_tokens=False
+        )
+        print(
+            f"[reranker] Model ready load_time={time.perf_counter() - started_at:.2f}s",
+            flush=True,
+        )
+
+    def predict(self, pairs: List[List[str]]) -> List[float]:
+        formatted = [self._format_pair(query, document) for query, document in pairs]
+        scores = []
+        content_length = self.max_length - len(self.prefix_tokens) - len(self.suffix_tokens)
+        if content_length < 1:
+            raise ValueError("QWEN_RERANKER_MAX_LENGTH is too small for the model prompt.")
+
+        for start in range(0, len(formatted), self.batch_size):
+            batch = formatted[start : start + self.batch_size]
+            inputs = self.tokenizer(
+                batch,
+                padding=False,
+                truncation=True,
+                max_length=content_length,
+                add_special_tokens=False,
+                return_attention_mask=False,
+            )
+            inputs["input_ids"] = [
+                self.prefix_tokens + token_ids + self.suffix_tokens
+                for token_ids in inputs["input_ids"]
+            ]
+            padded = self.tokenizer.pad(
+                inputs,
+                padding=True,
+                return_tensors="pt",
+            ).to(self.model.device)
+            with torch.inference_mode():
+                logits = self.model(**padded).logits[:, -1, :]
+                batch_scores = (
+                    logits[:, self.true_token_id] - logits[:, self.false_token_id]
+                )
+            scores.extend(batch_scores.float().cpu().tolist())
+
+        return scores
+
+    def _format_pair(self, query: str, document: str) -> str:
+        return (
+            f"<Instruct>: {self.instruction}\n"
+            f"<Query>: {query}\n"
+            f"<Document>: {document}"
+        )
 
 
 def tokenize(text: str) -> List[str]:
@@ -35,8 +143,8 @@ def tokenize(text: str) -> List[str]:
 
 
 class HybridSearchEngine:
-    def __init__(self, reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"):
-        self.reranker = CrossEncoder(reranker_model)
+    def __init__(self, reranker_model: str = DEFAULT_RERANKER_MODEL):
+        self.reranker = Qwen3Reranker(reranker_model)
         # Per-repo cached BM25 index so a question doesn't have to
         # re-tokenize and re-build the lexical index over every chunk in the
         # repo on every single request. Built once when indexing finishes,
@@ -137,7 +245,7 @@ class HybridSearchEngine:
         candidates: List[dict],
         top_k: Optional[int] = None,
     ) -> List[dict]:
-        """Score candidates with the cross-encoder and optionally truncate.
+        """Score candidates with Qwen3-Reranker-4B and optionally truncate.
 
         Reranking depth is intentionally separate from answer-context depth.
         Callers can rerank a broad candidate set and still send only a small
