@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 from statistics import mean
 
+import boto3
 from dotenv import load_dotenv
 
 SERVER_ROOT = Path(__file__).resolve().parents[1]
@@ -14,7 +15,8 @@ if str(SERVER_ROOT) not in sys.path:
 
 load_dotenv(SERVER_ROOT / ".env")
 
-from src.rag_system import CodebaseRAGSystem
+from src.rag_system import BEDROCK_QWEN_MODEL_ID, CodebaseRAGSystem
+from src.vector_store import ChromaVectorStore
 
 EVAL_SESSION_KEY = "eval-session"
 TOP_K = int(os.getenv("CODEBASE_RAG_TOP_K", "8"))
@@ -53,6 +55,66 @@ def validate_eval_set(repositories):
             if not case.get("expected_sources"):
                 errors.append(f"{case_id}: expected_sources must be a non-empty list")
     return errors
+
+
+def check_llm_available():
+    log(f"Checking Bedrock LLM availability: {BEDROCK_QWEN_MODEL_ID}")
+    client = boto3.client(
+        "bedrock-runtime",
+        region_name=os.getenv("AWS_REGION", os.getenv("AWS_DEFAULT_REGION", "us-east-1")),
+    )
+    try:
+        response = client.converse(
+            modelId=BEDROCK_QWEN_MODEL_ID,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [{"text": "Reply with exactly: ok"}],
+                }
+            ],
+            inferenceConfig={
+                "temperature": 0.0,
+                "maxTokens": 8,
+            },
+        )
+    except Exception as exc:
+        raise RuntimeError(f"Bedrock LLM check failed: {exc}") from exc
+
+    content_blocks = (
+        response.get("output", {})
+        .get("message", {})
+        .get("content", [])
+    )
+    text = "".join(block.get("text", "") for block in content_blocks).strip()
+    if not text:
+        raise RuntimeError("Bedrock LLM check returned an empty response.")
+    log("Bedrock LLM check passed")
+
+
+def should_reindex_existing_cache(vector_count: int) -> bool:
+    if vector_count <= 0:
+        log("No existing Chroma embeddings found; eval will index repositories.")
+        return True
+
+    env_choice = os.getenv("CODEBASE_RAG_REINDEX")
+    if env_choice is not None:
+        return env_choice.strip().lower() in {"1", "true", "yes", "y"}
+
+    prompt = (
+        f"Found {vector_count} existing Chroma embeddings. "
+        "Restart/re-index from scratch? [y/N]: "
+    )
+    if not sys.stdin.isatty():
+        log("Existing embeddings found; non-interactive run defaults to re-index=no.")
+        return False
+
+    answer = input(prompt).strip().lower()
+    return answer in {"y", "yes"}
+
+
+def get_cached_vector_count() -> int:
+    store = ChromaVectorStore(embedding_dim=0, persist=True)
+    return store.get_stats()["total_vectors"]
 
 
 def normalize_path(path: str) -> str:
@@ -141,6 +203,37 @@ def index_repo(rag_system, github_url: str, name: str):
         f"{repo_state['chunk_count']} chunks"
     )
     return repo.id
+
+
+def restore_or_index_repo(
+    rag_system,
+    repo_config: dict,
+    expected_repo_id: int,
+    reindex: bool,
+) -> int:
+    if not reindex:
+        restored_repo_id = rag_system.restore_repository_from_cache(
+            repo_config["github_url"],
+            EVAL_SESSION_KEY,
+            expected_repo_id,
+        )
+        if restored_repo_id is not None:
+            repo_state = rag_system.get_repository_for_session(
+                restored_repo_id,
+                EVAL_SESSION_KEY,
+            )
+            log(
+                f"Using cached embeddings for {repo_config['name']}: "
+                f"repo_id={restored_repo_id}, chunks={repo_state['chunk_count']}"
+            )
+            return restored_repo_id
+
+        log(
+            f"No cached embeddings found for {repo_config['name']} "
+            f"at repo_id={expected_repo_id}; indexing it now."
+        )
+
+    return index_repo(rag_system, repo_config["github_url"], repo_config["name"])
 
 
 def run_case(rag_system, repo_id: int, repo_name: str, case: dict):
@@ -238,19 +331,28 @@ def run():
     total_cases = sum(len(repo["cases"]) for repo in repositories)
     log(f"Loaded eval set: {len(repositories)} repositories, {total_cases} cases")
 
-    rag_system = CodebaseRAGSystem()
+    check_llm_available()
+    reindex = should_reindex_existing_cache(get_cached_vector_count())
+
+    rag_system = CodebaseRAGSystem(clear_existing_index=reindex)
     log(f"LLM provider={rag_system.llm_provider} model={rag_system.llm_model}")
+    log(f"Re-index from scratch={reindex}")
 
     details = []
     try:
-        for repo_config in repositories:
-            repo_id = index_repo(rag_system, repo_config["github_url"], repo_config["name"])
+        for expected_repo_id, repo_config in enumerate(repositories, start=1):
+            repo_id = restore_or_index_repo(
+                rag_system,
+                repo_config,
+                expected_repo_id,
+                reindex,
+            )
             cases = repo_config["cases"]
             for index, case in enumerate(cases, start=1):
                 log(f"[{repo_config['id']} {index}/{len(cases)}] {case['id']}")
                 details.append(run_case(rag_system, repo_id, repo_config["name"], case))
     finally:
-        rag_system.end_session(EVAL_SESSION_KEY)
+        rag_system.reset_session_state()
 
     report = {
         "config": {
