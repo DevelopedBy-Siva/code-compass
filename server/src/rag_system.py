@@ -45,6 +45,7 @@ class CodebaseRAGSystem:
         self,
         repo_dir: str = None,
         index_path: str = None,
+        clear_existing_index: bool = True,
     ):
         self.repo_fetcher = RepoFetcher(base_dir=repo_dir)
         self.parser = CodeParser()
@@ -68,11 +69,18 @@ class CodebaseRAGSystem:
         self.indexing_progress: Dict[int, dict] = {}
         self.repo_chunks: Dict[int, List[dict]] = {}
         self.cancelled_repo_ids = set()
-        self.rebuild_indexes()
+        if clear_existing_index:
+            self.rebuild_indexes()
+        else:
+            self.reset_session_state()
 
     def rebuild_indexes(self):
         with self.repo_lock:
             self.vector_store.clear()
+            self.reset_session_state()
+
+    def reset_session_state(self):
+        with self.repo_lock:
             self.repositories.clear()
             self.repository_registry.clear()
             self.next_repo_id = 1
@@ -229,6 +237,7 @@ class CodebaseRAGSystem:
                 vector_metadata.append(
                     {
                         "repository_id": repo.id,
+                        "source_url": repo.source_url or repo.github_url,
                         "file_path": chunk["file_path"],
                         "language": chunk["language"],
                         "symbol_name": chunk["symbol_name"],
@@ -237,6 +246,7 @@ class CodebaseRAGSystem:
                         "line_end": chunk["line_end"],
                         "signature": chunk["signature"],
                         "content": chunk["content"],
+                        "searchable_text": chunk["searchable_text"],
                     }
                 )
 
@@ -306,6 +316,50 @@ class CodebaseRAGSystem:
             if isinstance(exc, SessionCancelledError):
                 return
             raise
+
+    def restore_repository_from_cache(
+        self,
+        github_url: str,
+        session_key: str,
+        repo_id: int,
+    ) -> Optional[int]:
+        chunks = self.vector_store.get_repository_chunks(repo_id)
+        if not chunks:
+            return None
+        cached_source_urls = {
+            chunk.get("source_url")
+            for chunk in chunks
+            if chunk.get("source_url")
+        }
+        if cached_source_urls and github_url not in cached_source_urls:
+            return None
+
+        info = self.repo_fetcher.parse_github_url(github_url)
+        registry_key = self._build_registry_key(session_key, github_url)
+        repo = Repository(
+            id=repo_id,
+            github_url=registry_key,
+            source_url=github_url,
+            session_key=session_key,
+            session_expires_at=self._session_expiry(),
+            owner=info["owner"],
+            name=info["repo"],
+            branch=info["branch"],
+            status="indexed",
+            file_count=len({chunk.get("file_path") for chunk in chunks if chunk.get("file_path")}),
+            chunk_count=len(chunks),
+            indexed_at=datetime.utcnow(),
+        )
+
+        with self.repo_lock:
+            self.repositories[repo.id] = repo
+            self.repository_registry[registry_key] = repo.id
+            self.repo_chunks[repo.id] = chunks
+            self.next_repo_id = max(self.next_repo_id, repo.id + 1)
+            self.cancelled_repo_ids.discard(repo.id)
+
+        self.hybrid_search.build_for_repository(repo.id, chunks)
+        return repo.id
 
     def list_repositories(self) -> List[dict]:
         raise NotImplementedError

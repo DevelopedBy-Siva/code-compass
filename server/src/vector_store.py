@@ -81,6 +81,25 @@ class ChromaVectorStore:
 
         return ids
 
+    def get_repository_chunks(self, repo_id: int) -> List[dict]:
+        results = self.collection.get(
+            where={"repository_id": repo_id},
+            include=["documents", "metadatas"],
+        )
+        ids = results.get("ids") or []
+        documents = results.get("documents") or []
+        metadatas = results.get("metadatas") or []
+
+        chunks = []
+        for idx, document, meta in zip(ids, documents, metadatas):
+            payload = dict(meta or {})
+            payload["id"] = payload.get("id") or idx
+            payload["repository_id"] = repo_id
+            payload["content"] = document or payload.get("content") or ""
+            payload.setdefault("searchable_text", self._build_searchable_text(payload))
+            chunks.append(payload)
+        return chunks
+
     def search(
         self,
         query_embedding: np.ndarray,
@@ -143,6 +162,18 @@ class ChromaVectorStore:
             "collection_name": self.collection_name,
             "persist_path": self.persist_path if self.persist else None,
         }
+
+    @staticmethod
+    def _build_searchable_text(chunk: dict) -> str:
+        return "\n".join(
+            str(value or "")
+            for value in (
+                chunk.get("file_path"),
+                chunk.get("symbol_name"),
+                chunk.get("signature"),
+                chunk.get("content"),
+            )
+        )
 
     @staticmethod
     def _sanitize_metadata(meta: dict) -> dict:
