@@ -16,10 +16,6 @@ The project is designed around the parts of code RAG that are easy to underestim
 
 ## Results
 
-> **Model migration note:** The published results below were measured with the
-> previous Qwen3 4B embedding and reranking models. The runtime now uses the
-> 0.6B variants, so these metrics must be refreshed after the next evaluation.
-
 The evaluation suite contains 24 hand-written questions across three real, unfamiliar repositories:
 
 - [Documenso](https://github.com/documenso/documenso) — large TypeScript monorepo
@@ -31,22 +27,23 @@ The evaluation suite contains 24 hand-written questions across three real, unfam
 | Metric | Baseline | Optimized | Change |
 |---|---:|---:|---:|
 | Final-context retrieval hit rate | 58.33% (14/24) | **91.67% (22/24)** | **+33.34 pp** |
-| Top-1 hit rate | 33.33% (8/24) | **79.17% (19/24)** | **+45.84 pp** |
-| Mean Reciprocal Rank | 0.441 | **0.854** | **+93.7%** |
+| Top-1 hit rate | 33.33% (8/24) | **70.83% (17/24)** | **+37.50 pp** |
+| Mean Reciprocal Rank | 0.441 | **0.813** | **+84.2%** |
 | Candidate retrieval hit rate | — | **100% (24/24)** | — |
 | Expected-source grounded rate | 58.33% | **91.67%** | **+33.34 pp** |
+| LLM-judged faithfulness | — | **99.17%** | — |
 
 ### Results by repository
 
 | Repository | Retrieval | Top-1 | MRR |
 |---|---:|---:|---:|
-| Documenso | **100%** | **87.5%** | **0.938** |
-| FastAPI | **87.5%** | **75.0%** | **0.813** |
-| Django | **87.5%** | **75.0%** | **0.813** |
+| Documenso | **87.5%** | **75.0%** | **0.813** |
+| FastAPI | **87.5%** | **62.5%** | **0.750** |
+| Django | **100%** | **75.0%** | **0.875** |
 
-The optimized totals are aggregated from three repository-specific runs using the same retrieval implementation and eight cases per repository. Faithfulness judging was disabled in these optimization runs to isolate retrieval quality; the earlier full baseline measured answer faithfulness at 89.17%. The benchmark is intentionally small and should be read as a regression suite, not a universal code-retrieval benchmark.
+The optimized results use Qwen3-Embedding-0.6B and Qwen3-Reranker-0.6B across one complete run with eight cases per repository. All 24 answers received a faithfulness score; 23 scored 1.0 and one scored 0.8. The same Bedrock model generates and judges the answers, so faithfulness is a useful regression signal rather than an independent evaluation. The benchmark is intentionally small and should be read as a regression suite, not a universal code-retrieval benchmark.
 
-Two remaining misses are known and diagnosable: FastAPI OpenAPI generation and Django's request-to-response lifecycle. In both cases the relevant source enters the candidate set but loses during channel fusion or final ranking. This is useful evidence that the next improvement belongs in retrieval orchestration—not in fine-tuning the answer model.
+Two remaining misses are known and diagnosable: Documenso's signing-package implementation and FastAPI's OpenAPI generation. In both cases the expected implementation source enters the candidate set but falls outside the final eight sources. The generated answers remain faithful to alternative retrieved evidence, indicating that the next improvement belongs in final retrieval prioritization—not in fine-tuning the answer model.
 
 ## Product walkthrough
 
