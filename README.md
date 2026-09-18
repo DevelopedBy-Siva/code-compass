@@ -242,9 +242,10 @@ client are ready.
   quota before deployment.
 - Bedrock access to the configured `BEDROCK_MODEL_ID` in the same region.
 - A Qdrant Cloud cluster reachable from the endpoint.
-- A Secrets Manager secret containing the Qdrant API key as a plain string or
-  JSON object with `api_key`. Direct `QDRANT_API_KEY` is supported for local
-  development, but `QDRANT_API_KEY_SECRET_ARN` is preferred in AWS.
+- A Qdrant Cloud API key. The supplied workflow reads it from the
+  `QDRANT_API_KEY` GitHub environment secret. For stronger production secret
+  handling, store the value in AWS Secrets Manager and deploy its ARN through
+  `QDRANT_API_KEY_SECRET_ARN` instead.
 - GitHub and Vercel OIDC identity providers plus narrowly scoped IAM roles.
 
 The SageMaker execution role needs:
@@ -256,7 +257,8 @@ The SageMaker execution role needs:
   `cloudwatch:PutMetricData`;
 - generation: `bedrock:InvokeModel` on the selected model/inference-profile
   ARN;
-- configuration: `secretsmanager:GetSecretValue` on the Qdrant secret.
+- configuration, only when using `QDRANT_API_KEY_SECRET_ARN`:
+  `secretsmanager:GetSecretValue` on the Qdrant secret.
 
 The GitHub deployment role needs `ecr:GetAuthorizationToken`,
 `ecr:CreateRepository`, `ecr:DescribeRepositories`,
@@ -286,7 +288,7 @@ export SAGEMAKER_ENDPOINT_NAME=code-compass
 export SAGEMAKER_EXECUTION_ROLE_ARN=arn:aws:iam::123456789012:role/code-compass-sagemaker
 export SAGEMAKER_INSTANCE_TYPE=ml.g5.xlarge
 export QDRANT_URL=https://your-cluster.us-east.aws.cloud.qdrant.io:6333
-export QDRANT_API_KEY_SECRET_ARN=arn:aws:secretsmanager:us-east-1:123456789012:secret:qdrant-api-key
+export QDRANT_API_KEY=your-qdrant-api-key
 export CORS_ORIGINS=https://your-project.vercel.app
 
 ./scripts/build.sh
@@ -333,13 +335,21 @@ Create a protected GitHub environment named `production` with these secrets:
 | `SAGEMAKER_EXECUTION_ROLE_ARN` | Runtime role passed to SageMaker |
 | `SAGEMAKER_INSTANCE_TYPE` | Endpoint instance type, normally `ml.g5.xlarge` |
 | `QDRANT_URL` | Qdrant Cloud HTTPS endpoint |
-| `QDRANT_API_KEY_SECRET_ARN` | Secrets Manager ARN, not the secret value |
+| `QDRANT_API_KEY` | Qdrant Cloud API key used by the supplied workflow |
 | `CORS_ORIGINS` | Production Vercel origin |
 | `BEDROCK_MODEL_ID` | Bedrock model or inference-profile identifier |
 
 All values in the table are read through GitHub's `secrets` context. Environment
 protection rules and required reviewers are recommended for production
 deployment.
+
+The direct `QDRANT_API_KEY` path is convenient for a portfolio environment, but
+the deployment script places it in the SageMaker model's container environment.
+AWS advises against putting sensitive values in `CreateModel` environment
+fields. For a longer-lived or shared environment, use
+`QDRANT_API_KEY_SECRET_ARN`; the container will retrieve the value at startup,
+and the SageMaker execution role must have `secretsmanager:GetSecretValue` for
+that ARN.
 
 For Vercel, set `AWS_ROLE_ARN`, `SAGEMAKER_AWS_REGION`, and
 `SAGEMAKER_ENDPOINT_NAME`. Enable Vercel OIDC and configure the role trust

@@ -28,7 +28,7 @@ jobs:
       SAGEMAKER_EXECUTION_ROLE_ARN: ${{ secrets.SAGEMAKER_EXECUTION_ROLE_ARN }}
       SAGEMAKER_INSTANCE_TYPE: ${{ secrets.SAGEMAKER_INSTANCE_TYPE }}
       QDRANT_URL: ${{ secrets.QDRANT_URL }}
-      QDRANT_API_KEY_SECRET_ARN: ${{ secrets.QDRANT_API_KEY_SECRET_ARN }}
+      QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
       CORS_ORIGINS: ${{ secrets.CORS_ORIGINS }}
       BEDROCK_MODEL_ID: ${{ secrets.BEDROCK_MODEL_ID }}
       IMAGE_TAG: ${{ github.sha }}

@@ -40,6 +40,21 @@ class DeploymentContractTests(unittest.TestCase):
         self.assertEqual(settings.bedrock_model_id, "provider.model-v1")
         self.assertEqual(len(settings.cors_origins), 2)
 
+    def test_direct_qdrant_key_does_not_call_secrets_manager(self):
+        with patch.dict(
+            os.environ,
+            {
+                "QDRANT_URL": "https://qdrant.example",
+                "QDRANT_API_KEY": "direct-key",
+                "QDRANT_API_KEY_SECRET_ARN": "not-an-arn",
+            },
+            clear=True,
+        ), patch("src.config._secret_value") as secret_value:
+            settings = Settings.from_env()
+
+        self.assertEqual(settings.qdrant_api_key, "direct-key")
+        secret_value.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
