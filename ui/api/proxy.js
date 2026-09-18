@@ -8,23 +8,10 @@ const decoder = new TextDecoder();
 
 function getPathSegments(req) {
   const queryPath = req.query.path;
-  const fromQuery = Array.isArray(queryPath)
-    ? queryPath
-    : typeof queryPath === "string"
-      ? queryPath.split("/")
-      : [];
+  const parts = Array.isArray(queryPath) ? queryPath : [queryPath];
 
-  const querySegments = fromQuery
-    .flatMap((part) => String(part).split("/"))
-    .filter(Boolean);
-  if (querySegments.length > 0) {
-    return querySegments;
-  }
-
-  const requestPath = new URL(req.url, "http://localhost").pathname;
-  return requestPath
-    .replace(/^\/api\/?/, "")
-    .split("/")
+  return parts
+    .flatMap((part) => String(part || "").split("/"))
     .filter(Boolean);
 }
 
