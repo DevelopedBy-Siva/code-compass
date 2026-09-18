@@ -1,9 +1,11 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import axios from "axios";
 import { ArrowRight, ChevronLeft, ChevronRight, Compass, Link2, MapPinned, Plus, Wrench } from "lucide-react";
-import { API_URL, getSessionHeaders, getSessionId } from "./config";
+import { API_URL, getSessionHeaders, getSessionId, resetSessionId } from "./config";
 
 function App() {
+  const [sessionId, setSessionId] = useState(() => getSessionId());
+  const activeSessionIdRef = useRef(sessionId);
   const [repoUrl, setRepoUrl] = useState("");
   const [reindex, setReindex] = useState(false);
   const [repos, setRepos] = useState([]);
@@ -17,7 +19,7 @@ function App() {
   const [formError, setFormError] = useState("");
   const [stage, setStage] = useState("landing");
   const [citationsOpen, setCitationsOpen] = useState(true);
-  const sessionHeaders = useMemo(() => getSessionHeaders(), []);
+  const sessionHeaders = useMemo(() => getSessionHeaders(sessionId), [sessionId]);
 
   const selectedRepo = useMemo(
     () => repos.find((repo) => repo.id === selectedRepoId) || null,
@@ -37,24 +39,31 @@ function App() {
   }, [activeAnswerId, answerMessages]);
 
   const refreshRepos = useCallback(async (preserveSelection = true) => {
+    const requestSessionId = sessionId;
     setLoadingRepos(true);
     try {
       const { data } = await axios.get(`${API_URL}/api/repos`, {
         headers: sessionHeaders,
       });
+      if (activeSessionIdRef.current !== requestSessionId) return;
       setRepos(data);
 
-      if (data.length === 0) {
-        setSelectedRepoId(null);
-      } else if (!preserveSelection || !data.some((repo) => repo.id === selectedRepoId)) {
-        setSelectedRepoId(data[0].id);
-      }
+      setSelectedRepoId((currentRepoId) => {
+        if (data.length === 0) return null;
+        if (!preserveSelection || !data.some((repo) => repo.id === currentRepoId)) {
+          return data[0].id;
+        }
+        return currentRepoId;
+      });
     } catch {
+      if (activeSessionIdRef.current !== requestSessionId) return;
       setFormError("Unable to load repositories right now.");
     } finally {
-      setLoadingRepos(false);
+      if (activeSessionIdRef.current === requestSessionId) {
+        setLoadingRepos(false);
+      }
     }
-  }, [selectedRepoId, sessionHeaders]);
+  }, [sessionHeaders, sessionId]);
 
   useEffect(() => {
     refreshRepos(false);
@@ -190,24 +199,28 @@ function App() {
     }
   };
 
-  const endSession = async () => {
-    try {
-      await axios.post(`${API_URL}/api/session/end?session_id=${encodeURIComponent(getSessionId())}`);
-    } catch {
-      // Best effort cleanup.
-    } finally {
-      window.sessionStorage.clear();
-      setRepos([]);
-      setSelectedRepoId(null);
-      setMessages([]);
-      setActiveAnswerId(null);
-      setQuestion("");
-      setRepoUrl("");
-      setReindex(false);
-      setFormError("");
-      setIndexing(false);
-      setStage("landing");
-    }
+  const endSession = () => {
+    const endingSessionId = sessionId;
+
+    setRepos([]);
+    setSelectedRepoId(null);
+    setMessages([]);
+    setActiveAnswerId(null);
+    setQuestion("");
+    setRepoUrl("");
+    setReindex(false);
+    setFormError("");
+    setIndexing(false);
+    setStage("landing");
+    const nextSessionId = resetSessionId();
+    activeSessionIdRef.current = nextSessionId;
+    setSessionId(nextSessionId);
+
+    axios
+      .post(`${API_URL}/api/session/end?session_id=${encodeURIComponent(endingSessionId)}`)
+      .catch(() => {
+        // Best effort cleanup of the previous session.
+      });
   };
 
   if (stage === "landing") {
@@ -357,6 +370,17 @@ function WorkspaceScreen({
   setQuestion,
 }) {
   const hasCitations = Boolean(activeAnswerMessage?.answerData?.sources?.length);
+  const messagesContainerRef = useRef(null);
+
+  useEffect(() => {
+    const container = messagesContainerRef.current;
+    if (!container) return undefined;
+
+    const frame = window.requestAnimationFrame(() => {
+      container.scrollTo({ top: container.scrollHeight, behavior: "smooth" });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [messages]);
 
   return (
     <div
@@ -399,7 +423,10 @@ function WorkspaceScreen({
             </div>
           </div>
 
-          <div className="scrollbar-thin flex flex-1 flex-col gap-4 overflow-auto px-5 py-6 md:px-8">
+          <div
+            ref={messagesContainerRef}
+            className="scrollbar-thin flex flex-1 flex-col gap-4 overflow-auto px-5 py-6 md:px-8"
+          >
             {messages.length === 0 ? (
               <div className="flex flex-1 items-center justify-center rounded-[28px] border border-dashed border-white/10 bg-white/[0.02] p-8 text-center text-zinc-500">
                 Ask a question

@@ -19,8 +19,13 @@ export function getSessionId() {
   return value;
 }
 
-export function getSessionHeaders() {
+export function resetSessionId() {
+  window.sessionStorage.removeItem(SESSION_STORAGE_KEY);
+  return getSessionId();
+}
+
+export function getSessionHeaders(sessionId = getSessionId()) {
   return {
-    "X-Session-Id": getSessionId(),
+    "X-Session-Id": sessionId,
   };
 }
