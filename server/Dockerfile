@@ -36,16 +36,32 @@ RUN grep -v '^torch==' /app/requirements.txt > /tmp/container-requirements.txt \
 COPY --chown=app:app . /app
 RUN chmod +x /app/entrypoint.sh \
     && mkdir -p /opt/ml/model-cache /tmp/codecompass-repos \
-    && chown -R app:app /opt/ml/model-cache /tmp/codecompass-repos \
-    && if [ "$PRELOAD_MODELS" = "1" ]; then python /app/preload_models.py; fi \
-    && chown -R app:app /opt/ml/model-cache
+    && chown -R app:app /opt/ml/model-cache /tmp/codecompass-repos
+
+USER app
+
+RUN python - <<'PY'
+import os
+import shutil
+from pathlib import Path
+
+from src.repo_fetcher import RepoFetcher
+
+cache_dir = Path(os.environ["REPO_CACHE_DIR"])
+fetcher = RepoFetcher(base_dir=str(cache_dir))
+probe_dir = fetcher.base_dir / ".write-probe"
+probe_dir.mkdir(exist_ok=True)
+(probe_dir / "ok").write_text("ok", encoding="utf-8")
+shutil.rmtree(probe_dir)
+PY
+
+RUN if [ "$PRELOAD_MODELS" = "1" ]; then python /app/preload_models.py; fi
 
 # Production builds disable model-hub network checks only after the snapshots
 # have been downloaded. Development builds with PRELOAD_MODELS=0 stay online.
 ENV HF_HUB_OFFLINE=${PRELOAD_MODELS} \
     TRANSFORMERS_OFFLINE=${PRELOAD_MODELS}
 
-USER app
 EXPOSE 8080
 STOPSIGNAL SIGTERM
 

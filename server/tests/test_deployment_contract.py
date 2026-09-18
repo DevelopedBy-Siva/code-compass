@@ -1,7 +1,9 @@
 import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -11,6 +13,7 @@ if str(SERVER_ROOT) not in sys.path:
 
 from server_app import app
 from src.config import Settings
+from src.repo_fetcher import RepoFetcher
 
 
 class DeploymentContractTests(unittest.TestCase):
@@ -54,6 +57,25 @@ class DeploymentContractTests(unittest.TestCase):
 
         self.assertEqual(settings.qdrant_api_key, "direct-key")
         secret_value.assert_not_called()
+
+    def test_repo_fetcher_can_create_repositories_in_configured_cache(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cache_dir = Path(directory) / "codecompass-repos"
+            fetcher = RepoFetcher(base_dir=str(cache_dir))
+
+            def fake_clone(command, capture_output, text):
+                self.assertEqual(command[:3], ["git", "clone", "--depth"])
+                target_dir = Path(command[-1])
+                target_dir.mkdir(parents=True)
+                (target_dir / "README.md").write_text("# cached\n", encoding="utf-8")
+                return SimpleNamespace(returncode=0, stderr="", stdout="")
+
+            with patch("src.repo_fetcher.subprocess.run", side_effect=fake_clone):
+                repository = fetcher.clone_repository("https://github.com/example/project")
+
+            self.assertEqual(fetcher.base_dir, cache_dir)
+            self.assertTrue((cache_dir / "example-project" / "README.md").exists())
+            self.assertEqual(repository["local_path"], str(cache_dir / "example-project"))
 
 
 if __name__ == "__main__":

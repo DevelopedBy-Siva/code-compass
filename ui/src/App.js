@@ -291,22 +291,19 @@ function LandingScreen({
               </button>
             </div>
 
-            <div className="mt-4 flex items-center justify-between gap-4 rounded-[22px] border border-white/10 bg-black/20 px-4 py-3">
+            <div className="mt-3 flex items-center gap-3 px-1">
               <div className="min-w-0 text-left">
-                <p className="text-sm font-medium text-zinc-200">Re-index repository</p>
-                <p className="mt-0.5 text-xs text-zinc-500">
-                  Rebuild embeddings even when a saved Qdrant index exists.
-                </p>
+                <p className="text-xs font-medium text-zinc-400">Always re-embed</p>
               </div>
               <button
                 type="button"
                 role="switch"
                 aria-checked={reindex}
-                aria-label="Re-index repository"
+                aria-label="Always re-embed"
                 onClick={() => setReindex((current) => !current)}
                 disabled={indexing}
                 className={[
-                  "relative h-7 w-12 shrink-0 rounded-full border transition focus:outline-none focus-visible:ring-2 focus-visible:ring-white/60 disabled:cursor-wait disabled:opacity-50",
+                  "relative h-5 w-9 shrink-0 rounded-full border transition focus:outline-none focus-visible:ring-2 focus-visible:ring-white/60 disabled:cursor-wait disabled:opacity-50",
                   reindex
                     ? "border-white bg-white"
                     : "border-white/20 bg-white/10 hover:bg-white/15",
@@ -314,10 +311,10 @@ function LandingScreen({
               >
                 <span
                   className={[
-                    "absolute left-0 top-1 h-[18px] w-[18px] rounded-full transition-transform",
+                    "absolute left-0 top-0.5 h-3.5 w-3.5 rounded-full transition-transform",
                     reindex
-                      ? "translate-x-[22px] bg-black"
-                      : "translate-x-1 bg-zinc-400",
+                      ? "translate-x-[18px] bg-black"
+                      : "translate-x-0.5 bg-zinc-400",
                   ].join(" ")}
                 />
               </button>
