@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 from statistics import mean
 
+import boto3
 from dotenv import load_dotenv
 
 SERVER_ROOT = Path(__file__).resolve().parents[1]
@@ -14,7 +15,16 @@ if str(SERVER_ROOT) not in sys.path:
 
 load_dotenv(SERVER_ROOT / ".env")
 
-from src.rag_system import CodebaseRAGSystem
+# Evaluations frequently delete and rebuild their collection. Keep that data
+# isolated from the collection used by the application unless the caller
+# explicitly chooses another evaluation collection.
+os.environ["QDRANT_COLLECTION"] = os.getenv(
+    "QDRANT_EVAL_COLLECTION",
+    "code_compass_eval_qwen3_embedding_0_6b_last_token_cache_v2",
+)
+
+from src.rag_system import BEDROCK_QWEN_MODEL_ID, CodebaseRAGSystem
+from src.vector_store import QdrantVectorStore
 
 EVAL_SESSION_KEY = "eval-session"
 TOP_K = int(os.getenv("CODEBASE_RAG_TOP_K", "8"))
@@ -23,6 +33,11 @@ EVAL_SET_PATH = Path(
 )
 EVAL_OUTPUT_PATH = os.getenv("CODEBASE_RAG_EVAL_OUTPUT")
 ENABLE_FAITHFULNESS = os.getenv("CODEBASE_RAG_ENABLE_FAITHFULNESS", "1") == "1"
+EVAL_REPO_IDS = {
+    value.strip().lower()
+    for value in os.getenv("CODEBASE_RAG_EVAL_REPOS", "").split(",")
+    if value.strip()
+}
 
 
 def log(message: str):
@@ -53,6 +68,66 @@ def validate_eval_set(repositories):
             if not case.get("expected_sources"):
                 errors.append(f"{case_id}: expected_sources must be a non-empty list")
     return errors
+
+
+def check_llm_available():
+    log(f"Checking Bedrock LLM availability: {BEDROCK_QWEN_MODEL_ID}")
+    client = boto3.client(
+        "bedrock-runtime",
+        region_name=os.getenv("AWS_REGION", os.getenv("AWS_DEFAULT_REGION", "us-east-1")),
+    )
+    try:
+        response = client.converse(
+            modelId=BEDROCK_QWEN_MODEL_ID,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [{"text": "Reply with exactly: ok"}],
+                }
+            ],
+            inferenceConfig={
+                "temperature": 0.0,
+                "maxTokens": 8,
+            },
+        )
+    except Exception as exc:
+        raise RuntimeError(f"Bedrock LLM check failed: {exc}") from exc
+
+    content_blocks = (
+        response.get("output", {})
+        .get("message", {})
+        .get("content", [])
+    )
+    text = "".join(block.get("text", "") for block in content_blocks).strip()
+    if not text:
+        raise RuntimeError("Bedrock LLM check returned an empty response.")
+    log("Bedrock LLM check passed")
+
+
+def should_reindex_existing_cache(vector_count: int) -> bool:
+    if vector_count <= 0:
+        log("No existing Qdrant embeddings found; eval will index repositories.")
+        return True
+
+    env_choice = os.getenv("CODEBASE_RAG_REINDEX")
+    if env_choice is not None:
+        return env_choice.strip().lower() in {"1", "true", "yes", "y"}
+
+    prompt = (
+        f"Found {vector_count} existing Qdrant embeddings. "
+        "Restart/re-index from scratch? [y/N]: "
+    )
+    if not sys.stdin.isatty():
+        log("Existing embeddings found; non-interactive run defaults to re-index=no.")
+        return False
+
+    answer = input(prompt).strip().lower()
+    return answer in {"y", "yes"}
+
+
+def get_cached_vector_count() -> int:
+    store = QdrantVectorStore(embedding_dim=0)
+    return store.get_stats()["total_vectors"]
 
 
 def normalize_path(path: str) -> str:
@@ -89,6 +164,22 @@ def compute_retrieval_metrics(expected_sources, actual_sources):
         "top1_hit": int(top1),
         "reciprocal_rank": reciprocal_rank,
     }
+
+
+def compute_debug_stage_metrics(expected_sources, retrieval_debug, rank_key, rank_limit=None):
+    ranked = sorted(
+        (
+            (item.get(rank_key), item.get("file_path", ""))
+            for item in retrieval_debug
+            if item.get(rank_key) is not None
+            and (rank_limit is None or item.get(rank_key) <= rank_limit)
+        ),
+        key=lambda pair: pair[0],
+    )
+    return compute_retrieval_metrics(
+        expected_sources,
+        [file_path for _, file_path in ranked],
+    )
 
 
 def keyword_hits(answer: str, keywords):
@@ -143,6 +234,37 @@ def index_repo(rag_system, github_url: str, name: str):
     return repo.id
 
 
+def restore_or_index_repo(
+    rag_system,
+    repo_config: dict,
+    expected_repo_id: int,
+    reindex: bool,
+) -> int:
+    if not reindex:
+        restored_repo_id = rag_system.restore_repository_from_cache(
+            repo_config["github_url"],
+            EVAL_SESSION_KEY,
+            expected_repo_id,
+        )
+        if restored_repo_id is not None:
+            repo_state = rag_system.get_repository_for_session(
+                restored_repo_id,
+                EVAL_SESSION_KEY,
+            )
+            log(
+                f"Using cached embeddings for {repo_config['name']}: "
+                f"repo_id={restored_repo_id}, chunks={repo_state['chunk_count']}"
+            )
+            return restored_repo_id
+
+        log(
+            f"No cached embeddings found for {repo_config['name']} "
+            f"at repo_id={expected_repo_id}; indexing it now."
+        )
+
+    return index_repo(rag_system, repo_config["github_url"], repo_config["name"])
+
+
 def run_case(rag_system, repo_id: int, repo_name: str, case: dict):
     start = time.time()
     result = rag_system.answer_question(
@@ -173,6 +295,36 @@ def run_case(rag_system, repo_id: int, repo_name: str, case: dict):
             case.get("expected_sources", []),
         )
 
+    expected_sources = case.get("expected_sources", [])
+    stage_metrics = {
+        stage: compute_debug_stage_metrics(
+            expected_sources,
+            retrieval_debug,
+            rank_key,
+            rank_limit,
+        )
+        for stage, rank_key, rank_limit in (
+            ("semantic", "semantic_rank", None),
+            ("lexical", "bm25_rank", None),
+            ("fused", "fused_rank", None),
+            ("path", "path_rank", None),
+            ("reranker", "rerank_rank", None),
+            ("reranker_top_k", "rerank_rank", TOP_K),
+            ("prioritized", "prioritized_rank", None),
+            ("prioritized_top_k", "prioritized_rank", TOP_K),
+        )
+    }
+    candidate_retrieval_hit = int(
+        any(
+            item.get("expected_source")
+            and any(
+                item.get(rank_key) is not None
+                for rank_key in ("semantic_rank", "bm25_rank", "path_rank")
+            )
+            for item in retrieval_debug
+        )
+    )
+
     return {
         "id": case.get("id", case["question"]),
         "repo": repo_name,
@@ -185,8 +337,16 @@ def run_case(rag_system, repo_id: int, repo_name: str, case: dict):
         "retrieval_hit": retrieval["retrieval_hit"],
         "top1_hit": retrieval["top1_hit"],
         "reciprocal_rank": round(retrieval["reciprocal_rank"], 4),
+        "candidate_retrieval_hit": candidate_retrieval_hit,
+        **{
+            f"{stage}_hit": metrics["retrieval_hit"]
+            for stage, metrics in stage_metrics.items()
+        },
+        **{
+            f"{stage}_reciprocal_rank": round(metrics["reciprocal_rank"], 4)
+            for stage, metrics in stage_metrics.items()
+        },
         "expected_source_grounded": int(expected_source_grounded),
-        # Backward-compatible alias for older report consumers.
         "grounded": int(expected_source_grounded),
         "retrieval_debug": retrieval_debug,
         "faithfulness": judge_faithfulness(rag_system, case["question"], result.get("answer", ""), sources),
@@ -202,13 +362,27 @@ def summarize(details):
     faith_scores = [item["faithfulness"] for item in details if item["faithfulness"] is not None]
     return {
         "case_count": len(details),
+        "candidate_retrieval_hit_rate": round(
+            mean(item["candidate_retrieval_hit"] for item in details), 4
+        ),
+        "semantic_hit_rate": round(mean(item["semantic_hit"] for item in details), 4),
+        "lexical_hit_rate": round(mean(item["lexical_hit"] for item in details), 4),
+        "fused_hit_rate": round(mean(item["fused_hit"] for item in details), 4),
+        "reranker_hit_rate": round(mean(item["reranker_hit"] for item in details), 4),
+        "reranker_top_k_hit_rate": round(
+            mean(item["reranker_top_k_hit"] for item in details), 4
+        ),
+        "prioritized_hit_rate": round(mean(item["prioritized_hit"] for item in details), 4),
+        "prioritized_top_k_hit_rate": round(
+            mean(item["prioritized_top_k_hit"] for item in details), 4
+        ),
         "retrieval_hit_rate": round(mean(item["retrieval_hit"] for item in details), 4),
+        "final_context_hit_rate": round(mean(item["retrieval_hit"] for item in details), 4),
         "top1_hit_rate": round(mean(item["top1_hit"] for item in details), 4),
         "mrr": round(mean(item["reciprocal_rank"] for item in details), 4),
         "expected_source_grounded_rate": round(
             mean(item["expected_source_grounded"] for item in details), 4
         ),
-        # Backward-compatible alias.
         "grounded_answer_rate": round(mean(item["grounded"] for item in details), 4),
         "faithfulness": round(mean(faith_scores), 4) if faith_scores else None,
         "latency_p95_ms": round(latencies[p95_index], 1),
@@ -237,28 +411,65 @@ def run():
     if errors:
         raise RuntimeError("Eval set validation failed: " + "; ".join(errors))
 
+    if EVAL_REPO_IDS:
+        available_ids = {repo["id"].lower() for repo in repositories}
+        unknown_ids = EVAL_REPO_IDS - available_ids
+        if unknown_ids:
+            raise RuntimeError(
+                "Unknown CODEBASE_RAG_EVAL_REPOS values: "
+                + ", ".join(sorted(unknown_ids))
+                + ". Available repository ids: "
+                + ", ".join(sorted(available_ids))
+            )
+        repositories = [
+            repo for repo in repositories if repo["id"].lower() in EVAL_REPO_IDS
+        ]
+
     total_cases = sum(len(repo["cases"]) for repo in repositories)
     log(f"Loaded eval set: {len(repositories)} repositories, {total_cases} cases")
 
-    rag_system = CodebaseRAGSystem()
+    check_llm_available()
+    reindex = should_reindex_existing_cache(get_cached_vector_count())
+
+    rag_system = CodebaseRAGSystem(clear_existing_index=reindex)
     log(f"LLM provider={rag_system.llm_provider} model={rag_system.llm_model}")
+    log(f"Re-index from scratch={reindex}")
 
     details = []
     try:
-        for repo_config in repositories:
-            repo_id = index_repo(rag_system, repo_config["github_url"], repo_config["name"])
+        for expected_repo_id, repo_config in enumerate(repositories, start=1):
+            repo_id = restore_or_index_repo(
+                rag_system,
+                repo_config,
+                expected_repo_id,
+                reindex,
+            )
             cases = repo_config["cases"]
             for index, case in enumerate(cases, start=1):
                 log(f"[{repo_config['id']} {index}/{len(cases)}] {case['id']}")
                 details.append(run_case(rag_system, repo_id, repo_config["name"], case))
     finally:
-        rag_system.end_session(EVAL_SESSION_KEY)
+        rag_system.reset_session_state()
 
     report = {
         "config": {
             "llm_provider": rag_system.llm_provider,
             "llm_model": rag_system.llm_model,
+            "vector_store": "qdrant",
+            "vector_collection": rag_system.vector_store.collection_name,
+            "embedding_model": rag_system.embedder.model_name,
+            "embedding_dimension": rag_system.embedder.get_embedding_dim(),
+            "reranker_model": rag_system.hybrid_search.reranker_model_name,
+            "embedding_batch_size": rag_system.embedder.batch_size,
+            "reranker_batch_size": rag_system.hybrid_search.rerank_batch_size,
             "top_k": TOP_K,
+            "final_source_limit": max(
+                1,
+                min(
+                    TOP_K,
+                    int(os.getenv("RAG_FINAL_SOURCE_LIMIT", str(TOP_K))),
+                ),
+            ),
             "eval_set": str(EVAL_SET_PATH),
             "repositories": [
                 {"id": repo["id"], "name": repo["name"], "github_url": repo["github_url"]}

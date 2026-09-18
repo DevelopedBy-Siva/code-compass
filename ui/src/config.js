@@ -1,4 +1,6 @@
-export const API_URL = process.env.REACT_APP_API_URL;
+// Empty uses the same-origin Vercel function in production. Set this only
+// when the frontend should call a local/direct FastAPI server.
+export const API_URL = process.env.REACT_APP_API_URL || "";
 
 const SESSION_STORAGE_KEY = "repo_qa_session_id";
 

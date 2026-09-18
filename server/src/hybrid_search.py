@@ -1,12 +1,27 @@
+import os
 import re
 import threading
 from collections import defaultdict
 from typing import Dict, List, Optional
 
+import torch
+import torch.nn.functional as F
 from rank_bm25 import BM25Okapi
-from sentence_transformers import CrossEncoder
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_./:-]*")
+QWEN_RERANKER_ID = "Qwen/Qwen3-Reranker-0.6B"
+RERANK_INSTRUCTION = (
+    "Given a codebase question, determine whether the source passage provides "
+    "direct evidence needed to answer it"
+)
+RERANK_PREFIX = (
+    '<|im_start|>system\nJudge whether the Document meets the requirements based on '
+    'the Query and the Instruct provided. Note that the answer can only be "yes" '
+    'or "no".<|im_end|>\n<|im_start|>user\n'
+)
+RERANK_SUFFIX = "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+RERANK_MAX_LENGTH = 8192
 
 
 def tokenize(text: str) -> List[str]:
@@ -35,12 +50,43 @@ def tokenize(text: str) -> List[str]:
 
 
 class HybridSearchEngine:
-    def __init__(self, reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"):
-        self.reranker = CrossEncoder(reranker_model)
-        # Per-repo cached BM25 index so a question doesn't have to
-        # re-tokenize and re-build the lexical index over every chunk in the
-        # repo on every single request. Built once when indexing finishes,
-        # evicted when the repo is reset/deleted/expired.
+    def __init__(self, model_name: str = None, batch_size: int = None):
+        self.device = self._select_device()
+        self.reranker_model_name = model_name or os.getenv(
+            "RERANKER_MODEL_ID", QWEN_RERANKER_ID
+        )
+        print(
+            f"[reranker] Loading {self.reranker_model_name} on device={self.device}",
+            flush=True,
+        )
+        self.reranker_tokenizer = AutoTokenizer.from_pretrained(
+            self.reranker_model_name,
+            trust_remote_code=True,
+            padding_side="left",
+        )
+        if self.reranker_tokenizer.pad_token is None:
+            self.reranker_tokenizer.pad_token = self.reranker_tokenizer.eos_token
+        self.reranker = AutoModelForCausalLM.from_pretrained(
+            self.reranker_model_name,
+            trust_remote_code=True,
+            torch_dtype=torch.float16 if self.device == "cuda" else torch.float32,
+        ).to(self.device)
+        self.reranker.config.pad_token_id = self.reranker_tokenizer.pad_token_id
+        self.reranker.eval()
+        self._yes_token_id = self._label_token_id("yes")
+        self._no_token_id = self._label_token_id("no")
+        self._prefix_token_ids = self.reranker_tokenizer.encode(
+            RERANK_PREFIX,
+            add_special_tokens=False,
+        )
+        self._suffix_token_ids = self.reranker_tokenizer.encode(
+            RERANK_SUFFIX,
+            add_special_tokens=False,
+        )
+        self.rerank_batch_size = max(
+            1,
+            batch_size or int(os.getenv("RAG_RERANK_BATCH_SIZE", "4")),
+        )
         self._repo_indexes: Dict[int, dict] = {}
         self._index_lock = threading.Lock()
 
@@ -78,17 +124,11 @@ class HybridSearchEngine:
         if repo_id is not None:
             with self._index_lock:
                 cached = self._repo_indexes.get(repo_id)
-            # Guard against a stale cache (e.g. repo was re-indexed but the
-            # cache write raced with this read) by checking the corpus size
-            # still lines up before trusting it.
             if cached is not None and len(cached["chunks"]) == len(chunks):
                 bm25 = cached["bm25"]
                 source_chunks = cached["chunks"]
 
         if bm25 is None:
-            # Fall back to building an ephemeral index. Keeps this method
-            # correct on its own even if build_for_repository wasn't called
-            # first (e.g. direct/test usage), just without the caching win.
             corpus_tokens = [tokenize(chunk["searchable_text"]) for chunk in chunks]
             bm25 = BM25Okapi(corpus_tokens) if corpus_tokens else None
             source_chunks = chunks
@@ -137,29 +177,92 @@ class HybridSearchEngine:
         candidates: List[dict],
         top_k: Optional[int] = None,
     ) -> List[dict]:
-        """Score candidates with the cross-encoder and optionally truncate.
-
-        Reranking depth is intentionally separate from answer-context depth.
-        Callers can rerank a broad candidate set and still send only a small
-        final source set to the LLM.
-        """
         if not candidates:
             return []
 
-        pairs = [
-            [query, f'{item["file_path"]}\n{item.get("signature") or ""}\n{item["content"]}']
+        documents = [
+            f'{item["file_path"]}\n{item.get("signature") or ""}\n{item["content"]}'
             for item in candidates
         ]
-        scores = self.reranker.predict(pairs)
-
+        scores = self._score_relevance_batch(query, documents)
         reranked = []
         for item, score in zip(candidates, scores):
             enriched = dict(item)
-            enriched["rerank_score"] = float(score)
+            enriched["rerank_score"] = score
             reranked.append(enriched)
 
         reranked.sort(key=lambda item: item["rerank_score"], reverse=True)
         return reranked[:top_k] if top_k is not None else reranked
+
+    def _score_relevance(self, query: str, document: str) -> float:
+        return self._score_relevance_batch(query, [document])[0]
+
+    def _score_relevance_batch(self, query: str, documents: List[str]) -> List[float]:
+        scores = []
+        for start in range(0, len(documents), self.rerank_batch_size):
+            batch = documents[start : start + self.rerank_batch_size]
+            inputs = self._prepare_rerank_inputs(query, batch)
+            with torch.inference_mode():
+                logits = self.reranker(**inputs).logits[:, -1, :]
+
+            label_logits = torch.stack(
+                [logits[:, self._no_token_id], logits[:, self._yes_token_id]],
+                dim=1,
+            )
+            batch_scores = F.softmax(label_logits.float(), dim=1)[:, 1]
+            scores.extend(float(score) for score in batch_scores.detach().cpu())
+        return scores
+
+    def _prepare_rerank_inputs(self, query: str, documents: List[str]):
+        pairs = [self._format_rerank_pair(query, document) for document in documents]
+        content_limit = RERANK_MAX_LENGTH - len(self._prefix_token_ids) - len(
+            self._suffix_token_ids
+        )
+        encoded = self.reranker_tokenizer(
+            pairs,
+            padding=False,
+            truncation=True,
+            max_length=content_limit,
+            add_special_tokens=False,
+            return_attention_mask=False,
+        )
+        encoded["input_ids"] = [
+            self._prefix_token_ids + token_ids + self._suffix_token_ids
+            for token_ids in encoded["input_ids"]
+        ]
+        inputs = self.reranker_tokenizer.pad(
+            encoded,
+            padding=True,
+            return_tensors="pt",
+        )
+        return inputs.to(self.device)
+
+    @staticmethod
+    def _format_rerank_pair(query: str, document: str) -> str:
+        return (
+            f"<Instruct>: {RERANK_INSTRUCTION}\n"
+            f"<Query>: {query}\n"
+            f"<Document>: {document}"
+        )
+
+    def _label_token_id(self, label: str) -> int:
+        token_id = self.reranker_tokenizer.convert_tokens_to_ids(label)
+        if token_id is None or token_id == self.reranker_tokenizer.unk_token_id:
+            ids = self.reranker_tokenizer.encode(label, add_special_tokens=False)
+            if len(ids) != 1:
+                raise RuntimeError(
+                    f"Reranker label {label!r} must map to exactly one token; got {ids}."
+                )
+            token_id = ids[0]
+        return int(token_id)
+
+    @staticmethod
+    def _select_device() -> str:
+        if torch.cuda.is_available():
+            return "cuda"
+        if torch.backends.mps.is_available():
+            return "mps"
+        return "cpu"
 
     @staticmethod
     def normalize_semantic_results(results: List[dict]) -> List[dict]:

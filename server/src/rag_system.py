@@ -2,17 +2,21 @@ import os
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from threading import RLock
+from threading import Lock, RLock
 from typing import Dict, List, Optional
+from uuid import uuid4
 
-from openai import OpenAI
+import boto3
+from botocore.config import Config as BotoConfig
 
 from src.code_parser import CodeParser
-from src.bedrock_claude import create_bedrock_runtime_client, generate_bedrock_claude_text
 from src.embeddings import EmbeddingGenerator
 from src.hybrid_search import HybridSearchEngine
 from src.repo_fetcher import RepoFetcher
-from src.vector_store import ChromaVectorStore
+from src.vector_store import QdrantVectorStore
+from src.config import Settings
+
+BEDROCK_QWEN_MODEL_ID = os.getenv("BEDROCK_MODEL_ID", "qwen.qwen3-coder-next")
 
 
 class SessionCancelledError(RuntimeError):
@@ -29,6 +33,10 @@ class Repository:
     owner: str
     name: str
     branch: str = "main"
+    repository_key: str = ""
+    cache_generation: Optional[str] = None
+    cache_hit: bool = False
+    reindex_requested: bool = False
     local_path: Optional[str] = None
     status: str = "queued"
     error_message: Optional[str] = None
@@ -43,27 +51,31 @@ class CodebaseRAGSystem:
     def __init__(
         self,
         repo_dir: str = None,
-        index_path: str = None,
+        clear_existing_index: bool = False,
+        settings: Settings = None,
     ):
-        self.repo_fetcher = RepoFetcher(base_dir=repo_dir)
+        self.settings = settings or Settings.from_env()
+        self.repo_fetcher = RepoFetcher(base_dir=repo_dir or self.settings.repo_cache_dir)
         self.parser = CodeParser()
-        self.embedder = EmbeddingGenerator()
-        self.vector_store = ChromaVectorStore(
+        self.embedder = EmbeddingGenerator(model_name=self.settings.embedding_model_id)
+        self.vector_store = QdrantVectorStore(
             embedding_dim=self.embedder.get_embedding_dim(),
-            index_path=index_path or "./data/chroma",
-            persist=True,
+            collection_name=self.settings.qdrant_collection,
+            url=self.settings.qdrant_url,
+            api_key=self.settings.qdrant_api_key,
+            timeout_seconds=self.settings.qdrant_timeout_seconds,
+            upsert_batch_size=self.settings.qdrant_upsert_batch_size,
         )
         self.hybrid_search = HybridSearchEngine(
-            reranker_model=os.getenv(
-                "RERANKER_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2"
-            )
+            model_name=self.settings.reranker_model_id,
+            batch_size=self.settings.rerank_batch_size,
         )
-        self.app_env = os.getenv("APP_ENV", os.getenv("ENVIRONMENT", "local")).lower()
-        self.llm_provider = os.getenv("LLM_PROVIDER", "bedrock").lower()
+        self.app_env = self.settings.app_env
+        self.llm_provider = "bedrock"
         self.llm_client = None
-        self.llm_model = ""
+        self.llm_model = self.settings.bedrock_model_id
         self._configure_llm()
-        self.session_ttl_minutes = int(os.getenv("SESSION_TTL_MINUTES", "120"))
+        self.session_ttl_minutes = self.settings.session_ttl_minutes
         self.repo_lock = RLock()
         self.repositories: Dict[int, Repository] = {}
         self.repository_registry: Dict[str, int] = {}
@@ -71,11 +83,19 @@ class CodebaseRAGSystem:
         self.indexing_progress: Dict[int, dict] = {}
         self.repo_chunks: Dict[int, List[dict]] = {}
         self.cancelled_repo_ids = set()
-        self.rebuild_indexes()
+        self.index_locks: Dict[str, Lock] = {}
+        if clear_existing_index:
+            self.rebuild_indexes()
+        else:
+            self.reset_session_state()
 
     def rebuild_indexes(self):
         with self.repo_lock:
             self.vector_store.clear()
+            self.reset_session_state()
+
+    def reset_session_state(self):
+        with self.repo_lock:
             self.repositories.clear()
             self.repository_registry.clear()
             self.next_repo_id = 1
@@ -83,13 +103,29 @@ class CodebaseRAGSystem:
             self.indexing_progress.clear()
             self.cancelled_repo_ids.clear()
 
-    def create_or_reset_repository(self, github_url: str, session_key: str) -> Repository:
+    def create_or_reset_repository(
+        self,
+        github_url: str,
+        session_key: str,
+        reindex: bool = False,
+    ) -> Repository:
         info = self.repo_fetcher.parse_github_url(github_url)
-        registry_key = self._build_registry_key(session_key, github_url)
+        repository_key = self._build_repository_key(info)
+        registry_key = self._build_registry_key(session_key, repository_key)
+        cached_chunks = (
+            []
+            if reindex
+            else self.vector_store.get_repository_chunks(repository_key)
+        )
         with self.repo_lock:
             self._cleanup_expired_sessions()
             repo_id = self.repository_registry.get(registry_key)
             repo = self.repositories.get(repo_id) if repo_id else None
+            if repo is not None and repo.status in {"queued", "indexing"} and not reindex:
+                repo.session_expires_at = self._session_expiry()
+                self._mark_repo_updated(repo)
+                return repo
+
             if repo is None:
                 repo = Repository(
                     id=self.next_repo_id,
@@ -100,6 +136,7 @@ class CodebaseRAGSystem:
                     owner=info["owner"],
                     name=info["repo"],
                     branch=info["branch"],
+                    repository_key=repository_key,
                     status="queued",
                 )
                 self.next_repo_id += 1
@@ -113,21 +150,51 @@ class CodebaseRAGSystem:
                 repo.owner = info["owner"]
                 repo.name = info["repo"]
                 repo.branch = info["branch"]
-                repo.status = "queued"
-                repo.error_message = None
-                repo.file_count = 0
-                repo.chunk_count = 0
-                repo.indexed_at = None
+                repo.repository_key = repository_key
                 self._mark_repo_updated(repo)
                 self.cancelled_repo_ids.discard(repo.id)
-                self.hybrid_search.remove_repository(repo.id)
-                self.vector_store.remove_repository(repo.id)
-                self.repo_chunks.pop(repo.id, None)
+
+            repo.reindex_requested = bool(reindex)
+            repo.error_message = None
+            self.indexing_progress.pop(repo.id, None)
+
+            if cached_chunks:
+                self._hydrate_repository(repo, cached_chunks, cache_hit=True)
+            else:
+                repo.status = "queued"
+                repo.cache_hit = False
+                if not reindex:
+                    repo.file_count = 0
+                    repo.chunk_count = 0
+                    repo.indexed_at = None
+                    repo.cache_generation = None
+                    self.hybrid_search.remove_repository(repo.id)
+                    self.repo_chunks.pop(repo.id, None)
 
             return repo
 
     def index_repository(self, repo_id: int):
+        with self.repo_lock:
+            repo = self.repositories.get(repo_id)
+            if repo is None:
+                return
+            index_lock = self.index_locks.setdefault(repo.repository_key, Lock())
+
+        with index_lock:
+            with self.repo_lock:
+                repo = self.repositories.get(repo_id)
+                if repo is None:
+                    return
+                # Another session may have finished indexing the same
+                # repository while this task waited for the per-repo lock.
+                if repo.status == "indexed" and not repo.reindex_requested:
+                    return
+            self._index_repository(repo_id)
+
+    def _index_repository(self, repo_id: int):
         clone_info = None
+        staged_generation = None
+        generation_activated = False
         try:
             with self.repo_lock:
                 self._cleanup_expired_sessions()
@@ -141,6 +208,8 @@ class CodebaseRAGSystem:
                 repo.error_message = None
                 repo.session_expires_at = self._session_expiry()
                 self._mark_repo_updated(repo)
+                repository_key = repo.repository_key
+                staged_generation = str(uuid4())
 
             self._set_progress(repo.id, phase="cloning", message="Cloning repository")
 
@@ -197,6 +266,9 @@ class CodebaseRAGSystem:
                     discovered_chunks=len(chunk_payloads),
                 )
 
+            if not chunk_payloads:
+                raise RuntimeError("No supported source-code chunks were found in this repository")
+
             searchable_texts = [chunk["searchable_text"] for chunk in chunk_payloads]
             print(
                 f"[indexing] Parsed repo_id={repo.id} files={file_count} chunks={len(searchable_texts)}",
@@ -227,11 +299,20 @@ class CodebaseRAGSystem:
             )
             self._ensure_repo_not_cancelled(repo.id)
 
+            indexed_at = datetime.utcnow()
+
             vector_metadata = []
             for chunk in chunk_payloads:
                 vector_metadata.append(
                     {
-                        "repository_id": repo.id,
+                        "repository_key": repository_key,
+                        "cache_generation": staged_generation,
+                        "cache_ready": False,
+                        "indexed_at": indexed_at.isoformat(),
+                        "source_url": repo.source_url or repo.github_url,
+                        "owner": repo.owner,
+                        "repository_name": repo.name,
+                        "branch": repo.branch,
                         "file_path": chunk["file_path"],
                         "language": chunk["language"],
                         "symbol_name": chunk["symbol_name"],
@@ -240,6 +321,7 @@ class CodebaseRAGSystem:
                         "line_end": chunk["line_end"],
                         "signature": chunk["signature"],
                         "content": chunk["content"],
+                        "searchable_text": chunk["searchable_text"],
                     }
                 )
 
@@ -262,42 +344,77 @@ class CodebaseRAGSystem:
                 row = {
                     **chunk,
                     "id": embedding_id,
-                    "repository_id": repo.id,
                     "embedding_id": embedding_id,
                 }
                 created_rows.append(row)
 
             serialized = [self._serialize_chunk(chunk) for chunk in created_rows]
+            self._ensure_repo_not_cancelled(repo.id)
+            self.vector_store.activate_repository_generation(
+                repository_key,
+                staged_generation,
+            )
+            generation_activated = True
             with self.repo_lock:
-                self._ensure_repo_still_exists(repo.id)
-                self._ensure_repo_not_cancelled(repo.id)
-                repo.status = "indexed"
-                repo.file_count = file_count
-                repo.chunk_count = len(created_rows)
-                repo.indexed_at = datetime.utcnow()
-                repo.session_expires_at = self._session_expiry()
-                self._mark_repo_updated(repo)
-                self.repo_chunks[repo.id] = serialized
-            # Build the lexical (BM25) index once now, instead of
-            # re-tokenizing every chunk in the repo on every question.
-            self.hybrid_search.build_for_repository(repo.id, serialized)
+                matching_repositories = [
+                    item
+                    for item in self.repositories.values()
+                    if item.repository_key == repository_key
+                ]
+                for item in matching_repositories:
+                    item.status = "indexed"
+                    item.error_message = None
+                    item.file_count = file_count
+                    item.chunk_count = len(created_rows)
+                    item.indexed_at = indexed_at
+                    item.cache_generation = staged_generation
+                    item.cache_hit = item.id != repo.id
+                    item.reindex_requested = False
+                    item.branch = repo.branch
+                    item.session_expires_at = self._session_expiry()
+                    self._mark_repo_updated(item)
+                    self.repo_chunks[item.id] = list(serialized)
+                    self.indexing_progress.pop(item.id, None)
+            for item in matching_repositories:
+                self.hybrid_search.build_for_repository(item.id, serialized)
             self.vector_store.save()
             with self.repo_lock:
-                self.indexing_progress.pop(repo.id, None)
                 self.cancelled_repo_ids.discard(repo.id)
             self.repo_fetcher.cleanup_repository(clone_info["local_path"])
             print(f"[indexing] Repository index complete repo_id={repo.id}", flush=True)
         except Exception as exc:
             print(f"[indexing] Repository index failed repo_id={repo_id} error={exc}", flush=True)
-            self.vector_store.remove_repository(repo_id)
-            self.hybrid_search.remove_repository(repo_id)
+            recovered_from_cache = False
+            if (
+                staged_generation
+                and not generation_activated
+                and "repository_key" in locals()
+            ):
+                try:
+                    self.vector_store.remove_generation(repository_key, staged_generation)
+                except Exception as cleanup_exc:
+                    print(
+                        f"[indexing] Failed to remove staged generation "
+                        f"repo_id={repo_id} error={cleanup_exc}",
+                        flush=True,
+                    )
+            fallback_chunks = []
+            if "repository_key" in locals():
+                try:
+                    fallback_chunks = self.vector_store.get_repository_chunks(repository_key)
+                except Exception:
+                    fallback_chunks = []
             with self.repo_lock:
-                self.repo_chunks.pop(repo_id, None)
                 repo = self.repositories.get(repo_id)
                 if repo:
                     if repo_id in self.cancelled_repo_ids:
                         self._delete_repositories([repo], track_cancellation=False)
+                    elif fallback_chunks:
+                        self._hydrate_repository(repo, fallback_chunks, cache_hit=True)
+                        recovered_from_cache = True
                     else:
+                        self.hybrid_search.remove_repository(repo_id)
+                        self.repo_chunks.pop(repo_id, None)
                         repo.status = "failed"
                         repo.error_message = str(exc)
                         self._mark_repo_updated(repo)
@@ -310,7 +427,47 @@ class CodebaseRAGSystem:
                 self.indexing_progress.pop(repo_id, None)
             if isinstance(exc, SessionCancelledError):
                 return
+            if recovered_from_cache:
+                print(
+                    f"[indexing] Re-index failed; restored previous cache repo_id={repo_id}",
+                    flush=True,
+                )
+                return
             raise
+
+    def restore_repository_from_cache(
+        self,
+        github_url: str,
+        session_key: str,
+        repo_id: int,
+    ) -> Optional[int]:
+        info = self.repo_fetcher.parse_github_url(github_url)
+        repository_key = self._build_repository_key(info)
+        chunks = self.vector_store.get_repository_chunks(repository_key)
+        if not chunks:
+            return None
+
+        registry_key = self._build_registry_key(session_key, repository_key)
+        repo = Repository(
+            id=repo_id,
+            github_url=registry_key,
+            source_url=github_url,
+            session_key=session_key,
+            session_expires_at=self._session_expiry(),
+            owner=info["owner"],
+            name=info["repo"],
+            branch=info["branch"],
+            repository_key=repository_key,
+        )
+
+        with self.repo_lock:
+            self.repositories[repo.id] = repo
+            self.repository_registry[registry_key] = repo.id
+            self.next_repo_id = max(self.next_repo_id, repo.id + 1)
+            self.cancelled_repo_ids.discard(repo.id)
+            self._hydrate_repository(repo, chunks, cache_hit=True)
+
+        return repo.id
 
     def list_repositories(self) -> List[dict]:
         raise NotImplementedError
@@ -380,22 +537,32 @@ class CodebaseRAGSystem:
             else top_k * shallow_multiplier
         )
         search_depth = max(top_k, min(search_depth, 120))
+        # Over-fetch before de-duplication. Large repositories often contain
+        # translated copies of the same documentation and many chunks from a
+        # single file; those copies must not consume the candidate budget.
+        fetch_depth = min(max(search_depth * 3, search_depth), 300, len(repo_chunks))
 
         retrieval_query = self._build_retrieval_query(question, normalized_history)
         query_embedding = self.embedder.embed_text(retrieval_query)
 
         semantic_hits = []
-        for score, meta in self.vector_store.search(query_embedding, k=search_depth, repo_filter=repo_id):
+        for score, meta in self.vector_store.search(
+            query_embedding,
+            k=fetch_depth,
+            repository_key=repo.repository_key,
+        ):
             serialized = dict(meta)
             serialized["semantic_score"] = score
             semantic_hits.append(serialized)
+        semantic_hits = self._deduplicate_candidates(semantic_hits, search_depth)
 
         lexical_hits = self.hybrid_search.bm25_search(
             repo_chunks,
             retrieval_query,
-            top_k=search_depth,
+            top_k=fetch_depth,
             repo_id=repo_id,
         )
+        lexical_hits = self._deduplicate_candidates(lexical_hits, search_depth)
 
         semantic_hits = self.hybrid_search.normalize_semantic_results(semantic_hits)
         semantic_ranks = self._rank_map(semantic_hits)
@@ -418,17 +585,17 @@ class CodebaseRAGSystem:
 
         rerank_query = retrieval_query if question_intent in deep_search_intents else question
 
-        # Rerank broadly for recall. This is independent of the final LLM
-        # context size, which remains capped below.
-        rerank_pool = min(search_depth, 50)
+        rerank_pool = min(len(merged), max(50, top_k * 8))
         reranked = self.hybrid_search.rerank(rerank_query, merged, top_k=rerank_pool)
         rerank_ranks = self._rank_map(reranked)
 
         prioritized = self._prioritize_results(
-            question, retrieval_query, reranked, top_k=top_k
+            question, retrieval_query, reranked, top_k=rerank_pool
         )
+        prioritized_ranks = self._rank_map(prioritized)
 
-        final_top_k = min(top_k, 5)
+        configured_source_limit = int(os.getenv("RAG_FINAL_SOURCE_LIMIT", str(top_k)))
+        final_top_k = max(1, min(top_k, configured_source_limit))
         final_sources = self._select_answer_sources(
             question, prioritized, top_k=final_top_k
         )
@@ -452,6 +619,7 @@ class CodebaseRAGSystem:
                         "fused_rank": fused_ranks.get(chunk_id),
                         "path_rank": path_ranks.get(chunk_id),
                         "rerank_rank": rerank_ranks.get(chunk_id),
+                        "prioritized_rank": prioritized_ranks.get(chunk_id),
                         "final_rank": final_ranks.get(chunk_id),
                         "semantic_score": item.get("semantic_score"),
                         "bm25_score": item.get("bm25_score"),
@@ -573,7 +741,6 @@ Rules:
 
         joined_context = "\n\n".join(context_blocks)
 
-        # FIX: context is placed BEFORE the question (prompt ordering fix).
         user_prompt = f"""
 Repository: {repo.owner}/{repo.name}
 
@@ -627,120 +794,44 @@ Do not leave the answer unfinished.
         }
 
     def _configure_llm(self):
-        if self.llm_provider == "bedrock":
-            self.llm_client = create_bedrock_runtime_client()
-            self.llm_model = os.getenv(
-                "BEDROCK_LLM_MODEL",
-                "anthropic.claude-3-5-sonnet-20240620-v1:0",
-            )
-            return
+        self.llm_client = boto3.client(
+            "bedrock-runtime",
+            region_name=self.settings.aws_region,
+            config=BotoConfig(
+                connect_timeout=5,
+                read_timeout=70,
+                retries={"max_attempts": 3, "mode": "standard"},
+            ),
+        )
 
-        if self.llm_provider == "groq":
-            self.llm_client = OpenAI(
-                api_key=os.getenv("GROQ_API_KEY"),
-                base_url=os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1"),
-            )
-            self.llm_model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
-            return
-
-        if self.llm_provider == "vertex_ai":
-            project = os.getenv("GOOGLE_CLOUD_PROJECT")
-            location = os.getenv("GOOGLE_CLOUD_LOCATION", "global")
-            if not project:
-                raise RuntimeError(
-                    "GOOGLE_CLOUD_PROJECT must be set when using Vertex AI LLMs."
-                )
-
-            self.llm_model = os.getenv("VERTEX_LLM_MODEL", "claude-3-5-sonnet@20240620")
-            if self.llm_model.startswith("claude-"):
-                try:
-                    from anthropic import AnthropicVertex
-                except ImportError as exc:
-                    raise RuntimeError(
-                        "Vertex AI Claude support requires the `anthropic[vertex]` package."
-                    ) from exc
-                self.llm_client = AnthropicVertex(project_id=project, region=location)
-                return
-
-            try:
-                from google import genai
-            except ImportError as exc:
-                raise RuntimeError(
-                    "Vertex AI Gemini support requires the `google-genai` package."
-                ) from exc
-
-            self.llm_client = genai.Client(
-                vertexai=True,
-                project=project,
-                location=location,
-            )
-            return
-
-        raise RuntimeError(f"Unsupported LLM provider: {self.llm_provider}")
+    def close(self):
+        self.vector_store.save()
+        self.vector_store.close()
 
     def _generate_markdown_response(self, system_prompt: str, user_prompt: str) -> tuple[str, str]:
-        if self.llm_provider == "bedrock":
-            text, stop_reason = generate_bedrock_claude_text(
-                self.llm_client,
-                self.llm_model,
-                system_prompt,
-                user_prompt,
-                max_tokens=2200,
-                temperature=0.1,
-            )
-            return self._normalize_markdown_answer(text), stop_reason
-
-        if self.llm_provider == "groq":
-            response = self.llm_client.chat.completions.create(
-                model=self.llm_model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                temperature=0.1,
-                max_tokens=1600,
-            )
-            content = response.choices[0].message.content
-            finish_reason = getattr(response.choices[0], "finish_reason", "") or ""
-            return self._normalize_markdown_answer(content), str(finish_reason)
-
-        if self.llm_provider == "vertex_ai" and self.llm_model.startswith("claude-"):
-            message = self.llm_client.messages.create(
-                model=self.llm_model,
-                system=system_prompt.strip(),
-                max_tokens=2200,
-                temperature=0.1,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": user_prompt.strip(),
-                    }
-                ],
-            )
-            content_blocks = getattr(message, "content", None) or []
-            text = "".join(
-                getattr(block, "text", "") for block in content_blocks if getattr(block, "text", "")
-            )
-            if not text.strip():
-                raise RuntimeError("Vertex AI Claude returned an empty response.")
-            stop_reason = getattr(message, "stop_reason", "") or ""
-            return self._normalize_markdown_answer(text), str(stop_reason)
-
-        response = self.llm_client.models.generate_content(
-            model=self.llm_model,
-            contents=f"{system_prompt.strip()}\n\n{user_prompt.strip()}",
-            config={
+        response = self.llm_client.converse(
+            modelId=self.llm_model,
+            system=[{"text": system_prompt.strip()}],
+            messages=[
+                {
+                    "role": "user",
+                    "content": [{"text": user_prompt.strip()}],
+                }
+            ],
+            inferenceConfig={
                 "temperature": 0.1,
-                "max_output_tokens": 2200,
+                "maxTokens": 2200,
             },
         )
-        if not getattr(response, "text", None):
-            raise RuntimeError("Vertex AI Gemini returned an empty response.")
-        finish_reason = ""
-        candidates = getattr(response, "candidates", None) or []
-        if candidates:
-            finish_reason = str(getattr(candidates[0], "finish_reason", "") or "")
-        return self._normalize_markdown_answer(response.text), finish_reason
+        content_blocks = (
+            response.get("output", {})
+            .get("message", {})
+            .get("content", [])
+        )
+        text = "".join(block.get("text", "") for block in content_blocks)
+        if not text.strip():
+            raise RuntimeError("Bedrock Qwen returned an empty response.")
+        return self._normalize_markdown_answer(text), response.get("stopReason", "")
 
     @staticmethod
     def _normalize_markdown_answer(raw_text: str) -> str:
@@ -773,7 +864,6 @@ Do not leave the answer unfinished.
         if not cleaned:
             return "I found relevant code context, but the model returned an empty response."
 
-        # If the tail still looks truncated, trim back to the last complete sentence or list item
         if CodebaseRAGSystem._looks_incomplete(cleaned):
             sentence_match = re.search(r"(?s)^.*[.!?](?:['\"\)`\]]+)?", cleaned)
             if sentence_match:
@@ -830,14 +920,11 @@ Do not leave the answer unfinished.
             if 1 <= number <= max_source:
                 cited_numbers.add(number)
                 return match.group(0)
-            # Drop citation markers that don't correspond to a real source.
             return ""
 
         cleaned_text = re.sub(r"\[(\d+)\]", _keep_or_drop, answer_text)
         cleaned_text = re.sub(r"[ \t]+([.,;:!?])", r"\1", cleaned_text).strip()
 
-        # If the model didn't cite anything inline, fall back to listing every
-        # retrieved source so the response is still grounded in a traceable way.
         numbers_to_cite = cited_numbers if cited_numbers else set(range(1, max_source + 1))
 
         citations = []
@@ -877,6 +964,8 @@ Do not leave the answer unfinished.
             "owner": repo.owner,
             "name": repo.name,
             "branch": repo.branch,
+            "cache_hit": repo.cache_hit,
+            "reindex_requested": repo.reindex_requested,
             "local_path": repo.local_path,
             "status": repo.status,
             "error_message": repo.error_message,
@@ -927,7 +1016,6 @@ Do not leave the answer unfinished.
             if track_cancellation:
                 self.cancelled_repo_ids.add(repo_id)
             self.hybrid_search.remove_repository(repo_id)
-            self.vector_store.remove_repository(repo_id)
             self.repo_chunks.pop(repo_id, None)
             self.indexing_progress.pop(repo_id, None)
             repo = self.repositories.pop(repo_id, None)
@@ -1004,6 +1092,46 @@ Do not leave the answer unfinished.
             return "/".join(parts[:2])
         return parts[0]
 
+    @staticmethod
+    def _translated_document_family(file_path: str) -> Optional[str]:
+        """Return a locale-independent path for translated documentation."""
+        normalized = (file_path or "").lower().strip("/")
+        match = re.match(
+            r"^docs/([a-z]{2,3}(?:-[a-z0-9]{2,8})?)/docs/(.+)$",
+            normalized,
+        )
+        if match:
+            return f"docs/{match.group(2)}"
+        return None
+
+    @classmethod
+    def _deduplicate_candidates(cls, results: List[dict], top_k: int) -> List[dict]:
+        """Limit file and translation-family flooding while preserving rank."""
+        selected = []
+        counts = {}
+        translated_slots = {}
+        for item in results:
+            file_path = (item.get("file_path") or "").lower()
+            translated_family = cls._translated_document_family(file_path)
+            if translated_family in translated_slots:
+                slot = translated_slots[translated_family]
+                current_path = (selected[slot].get("file_path") or "").lower()
+                if "/en/docs/" in file_path and "/en/docs/" not in current_path:
+                    selected[slot] = item
+                continue
+
+            if len(selected) >= top_k:
+                continue
+            key = translated_family or file_path
+            limit = 1 if translated_family else 3
+            if counts.get(key, 0) >= limit:
+                continue
+            counts[key] = counts.get(key, 0) + 1
+            selected.append(item)
+            if translated_family:
+                translated_slots[translated_family] = len(selected) - 1
+        return selected
+
     def _merge_ranked_candidates(
         self,
         ranked_results: List[dict],
@@ -1020,7 +1148,11 @@ Do not leave the answer unfinished.
 
         for rank, item in enumerate(path_results, start=1):
             existing = merged.get(item["id"])
-            path_bonus = 1.0 / (20 + rank)
+            # Path matching is a useful supporting signal, but it is much
+            # noisier than semantic/BM25 retrieval. Keep it below one full RRF
+            # channel so a generic path hit cannot outrank a candidate found
+            # strongly by both primary retrievers.
+            path_bonus = 0.5 / (60 + rank)
             if existing is None:
                 enriched = dict(item)
                 enriched["rrf_score"] = float(enriched.get("rrf_score", 0.0)) + path_bonus
@@ -1103,7 +1235,7 @@ Do not leave the answer unfinished.
             ),
             reverse=True,
         )
-        return scored[:top_k]
+        return self._deduplicate_candidates(scored, top_k)
 
     def _prioritize_results(
         self,
@@ -1256,6 +1388,21 @@ Do not leave the answer unfinished.
             return "tests"
         if has_any({"error", "invalid", "conflict", "raises", "guard against"}):
             return "error_handling"
+        if (
+            has_any(
+                {
+                    "flow",
+                    "across",
+                    "across files",
+                    "connect",
+                    "code path",
+                    "lifecycle",
+                    "reach",
+                }
+            )
+            or (has_any({"request", "incoming request"}) and has_any({"response"}))
+        ):
+            return "cross_file"
         if has_any(
             {
                 "api",
@@ -1294,8 +1441,6 @@ Do not leave the answer unfinished.
             }
         ):
             return "setup"
-        if has_any({"flow", "across", "across files", "connect", "code path"}):
-            return "cross_file"
         if has_any(
             {
                 "behavior",
@@ -1579,6 +1724,21 @@ Do not leave the answer unfinished.
                 score += 4
             if any(token in file_path for token in {"api", "route", "router", "controller"}):
                 score += 2
+        translated_family = self._translated_document_family(file_path)
+        if translated_family:
+            # Localized copies should not crowd canonical implementation or
+            # English/top-level documentation out of a small context window.
+            score -= 2 if intent in {"docs", "overview"} else 7
+
+        is_test_path = (
+            file_path.startswith("tests/")
+            or "/tests/" in file_path
+            or basename.startswith("test_")
+            or ".test." in basename
+            or ".spec." in basename
+        )
+        if is_test_path and intent != "tests":
+            score -= 5
         if intent in {"implementation", "cross_file"}:
             if not self._is_doc_source(item):
                 score += 2
@@ -1746,8 +1906,51 @@ Do not leave the answer unfinished.
         return datetime.utcnow() + timedelta(minutes=self.session_ttl_minutes)
 
     @staticmethod
-    def _build_registry_key(session_key: str, github_url: str) -> str:
-        return f"{session_key}::{github_url}"
+    def _build_repository_key(info: dict) -> str:
+        owner = str(info["owner"]).strip().lower()
+        name = str(info["repo"]).strip().lower()
+        branch = str(info.get("branch") or "main").strip()
+        return f"github:{owner}/{name}@{branch}"
+
+    @staticmethod
+    def _build_registry_key(session_key: str, repository_key: str) -> str:
+        return f"{session_key}::{repository_key}"
+
+    def _hydrate_repository(
+        self,
+        repo: Repository,
+        chunks: List[dict],
+        cache_hit: bool,
+    ) -> None:
+        serialized = [self._serialize_chunk(chunk) for chunk in chunks]
+        first = chunks[0]
+        repo.status = "indexed"
+        repo.error_message = None
+        repo.file_count = len(
+            {chunk.get("file_path") for chunk in chunks if chunk.get("file_path")}
+        )
+        repo.chunk_count = len(serialized)
+        repo.indexed_at = self._parse_cached_datetime(first.get("indexed_at"))
+        repo.cache_generation = str(first.get("cache_generation") or "") or None
+        repo.cache_hit = cache_hit
+        repo.reindex_requested = False
+        repo.branch = str(first.get("branch") or repo.branch)
+        repo.session_expires_at = self._session_expiry()
+        self._mark_repo_updated(repo)
+        self.repo_chunks[repo.id] = serialized
+        self.indexing_progress.pop(repo.id, None)
+        self.hybrid_search.build_for_repository(repo.id, serialized)
+
+    @staticmethod
+    def _parse_cached_datetime(value) -> datetime:
+        if value:
+            try:
+                return datetime.fromisoformat(str(value).replace("Z", "+00:00")).replace(
+                    tzinfo=None
+                )
+            except ValueError:
+                pass
+        return datetime.utcnow()
 
     @staticmethod
     def _serialize_chunk(chunk: dict) -> dict:
