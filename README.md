@@ -267,7 +267,8 @@ The GitHub deployment role needs `ecr:GetAuthorizationToken`,
 `sagemaker:CreateModel`,
 `sagemaker:DescribeModel`, `sagemaker:CreateEndpointConfig`,
 `sagemaker:DescribeEndpointConfig`, `sagemaker:CreateEndpoint`,
-`sagemaker:UpdateEndpoint`, `sagemaker:DescribeEndpoint`, and
+`sagemaker:UpdateEndpoint`, `sagemaker:DeleteEndpoint`,
+`sagemaker:DescribeEndpoint`, and
 `iam:PassRole` restricted to the SageMaker execution role with
 `iam:PassedToService = sagemaker.amazonaws.com`. Its trust policy should
 restrict GitHub's OIDC `sub` claim to this repository, the `main` branch, and
@@ -302,7 +303,8 @@ requires outbound Hugging Face access at startup and is not recommended for
 production. `push.sh` logs in to ECR, tags, and pushes the image. `deploy.sh`
 uses an image-and-environment hash for immutable SageMaker model/config names,
 creates missing resources, updates an existing endpoint only when needed, and
-waits for `InService`.
+waits for `InService`. If an endpoint is in `Failed`, the script deletes it,
+waits for deletion to finish, and recreates it with the desired configuration.
 
 The Dockerfile deliberately uses the official PyTorch CUDA runtime as a single
 stage. A conventional Python builder stage would download and retain another
