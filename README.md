@@ -322,9 +322,9 @@ pushes it to ECR, and updates the endpoint. It requests `id-token: write` and
 assumes the deployment role using GitHub OIDC; no AWS access-key secrets are
 used.
 
-Create a protected GitHub environment named `production` with these variables:
+Create a protected GitHub environment named `production` with these secrets:
 
-| GitHub environment variable | Purpose |
+| GitHub environment secret | Purpose |
 |---|---|
 | `AWS_GITHUB_ROLE_ARN` | OIDC deployment role assumed by Actions |
 | `AWS_REGION` | ECR, SageMaker, Secrets Manager, and Bedrock region |
@@ -337,8 +337,9 @@ Create a protected GitHub environment named `production` with these variables:
 | `CORS_ORIGINS` | Production Vercel origin |
 | `BEDROCK_MODEL_ID` | Bedrock model or inference-profile identifier |
 
-No GitHub Secrets are required by the supplied workflow. Environment protection
-rules and required reviewers are recommended for production deployment.
+All values in the table are read through GitHub's `secrets` context. Environment
+protection rules and required reviewers are recommended for production
+deployment.
 
 For Vercel, set `AWS_ROLE_ARN`, `SAGEMAKER_AWS_REGION`, and
 `SAGEMAKER_ENDPOINT_NAME`. Enable Vercel OIDC and configure the role trust

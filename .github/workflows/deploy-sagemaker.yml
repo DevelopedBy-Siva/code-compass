@@ -22,15 +22,15 @@ jobs:
     runs-on: ubuntu-latest
     environment: production
     env:
-      AWS_REGION: ${{ vars.AWS_REGION }}
-      ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
-      SAGEMAKER_ENDPOINT_NAME: ${{ vars.SAGEMAKER_ENDPOINT_NAME }}
-      SAGEMAKER_EXECUTION_ROLE_ARN: ${{ vars.SAGEMAKER_EXECUTION_ROLE_ARN }}
-      SAGEMAKER_INSTANCE_TYPE: ${{ vars.SAGEMAKER_INSTANCE_TYPE }}
-      QDRANT_URL: ${{ vars.QDRANT_URL }}
-      QDRANT_API_KEY_SECRET_ARN: ${{ vars.QDRANT_API_KEY_SECRET_ARN }}
-      CORS_ORIGINS: ${{ vars.CORS_ORIGINS }}
-      BEDROCK_MODEL_ID: ${{ vars.BEDROCK_MODEL_ID }}
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+      ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+      SAGEMAKER_ENDPOINT_NAME: ${{ secrets.SAGEMAKER_ENDPOINT_NAME }}
+      SAGEMAKER_EXECUTION_ROLE_ARN: ${{ secrets.SAGEMAKER_EXECUTION_ROLE_ARN }}
+      SAGEMAKER_INSTANCE_TYPE: ${{ secrets.SAGEMAKER_INSTANCE_TYPE }}
+      QDRANT_URL: ${{ secrets.QDRANT_URL }}
+      QDRANT_API_KEY_SECRET_ARN: ${{ secrets.QDRANT_API_KEY_SECRET_ARN }}
+      CORS_ORIGINS: ${{ secrets.CORS_ORIGINS }}
+      BEDROCK_MODEL_ID: ${{ secrets.BEDROCK_MODEL_ID }}
       IMAGE_TAG: ${{ github.sha }}
 
     steps:
@@ -56,8 +56,8 @@ jobs:
       - name: Configure temporary AWS credentials through GitHub OIDC
         uses: aws-actions/configure-aws-credentials@v6.3.0
         with:
-          role-to-assume: ${{ vars.AWS_GITHUB_ROLE_ARN }}
-          aws-region: ${{ vars.AWS_REGION }}
+          role-to-assume: ${{ secrets.AWS_GITHUB_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
 
       - name: Build image
         run: ./scripts/build.sh
