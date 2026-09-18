@@ -56,6 +56,7 @@ class Settings:
     rerank_batch_size: int
     reranker_model_id: str
     session_ttl_minutes: int
+    enable_profiling: bool = False
 
     @classmethod
     def from_env(cls, *, require_external_services: bool = True) -> "Settings":
@@ -89,6 +90,8 @@ class Settings:
             embedding_model_id=os.getenv(
                 "EMBEDDING_MODEL_ID", "Qwen/Qwen3-Embedding-0.6B"
             ).strip(),
+            enable_profiling=os.getenv("ENABLE_PROFILING", "false").strip().lower()
+            in {"1", "true", "yes", "on"},
             log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
             qdrant_api_key=api_key,
             qdrant_collection=os.getenv(

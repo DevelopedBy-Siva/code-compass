@@ -38,6 +38,18 @@ class DeploymentContractTests(unittest.TestCase):
         self.assertIn(("/ping", "POST"), routes)
         self.assertIn(("/invocations", "POST"), routes)
 
+    def test_profiling_flag_is_forwarded_to_container_runtimes(self):
+        local_test = (REPOSITORY_ROOT / "scripts/test-local-sagemaker.sh").read_text(
+            encoding="utf-8"
+        )
+        deploy_script = (REPOSITORY_ROOT / "scripts/deploy.sh").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn('ENABLE_PROFILING="${ENABLE_PROFILING:-false}"', local_test)
+        self.assertIn('--arg enable_profiling "${ENABLE_PROFILING:-false}"', deploy_script)
+        self.assertIn("ENABLE_PROFILING:$enable_profiling", deploy_script)
+
     def test_settings_validate_required_qdrant_url(self):
         with patch.dict(os.environ, {}, clear=True):
             with self.assertRaisesRegex(RuntimeError, "QDRANT_URL is required"):

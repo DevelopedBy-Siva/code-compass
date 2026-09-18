@@ -62,6 +62,7 @@ env_args=(
   -e BEDROCK_MODEL_ID="${BEDROCK_MODEL_ID:-qwen.qwen3-coder-next}"
   -e CORS_ORIGINS="$CORS_ORIGINS"
   -e EMBEDDING_MODEL_ID="${EMBEDDING_MODEL_ID:-Qwen/Qwen3-Embedding-0.6B}"
+  -e ENABLE_PROFILING="${ENABLE_PROFILING:-false}"
   -e HF_HOME="${HF_HOME:-/opt/ml/model-cache}"
   -e LOG_LEVEL="${LOG_LEVEL:-INFO}"
   -e PORT=8080

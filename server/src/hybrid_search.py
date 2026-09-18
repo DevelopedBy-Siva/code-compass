@@ -1,6 +1,7 @@
 import os
 import re
 import threading
+import time
 from collections import defaultdict
 from typing import Dict, List, Optional
 
@@ -8,6 +9,11 @@ import torch
 import torch.nn.functional as F
 from rank_bm25 import BM25Okapi
 from transformers import AutoModelForCausalLM, AutoTokenizer
+
+from src.app_logging import fields, get_logger
+
+
+startup_logger = get_logger("startup")
 
 TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_./:-]*")
 QWEN_RERANKER_ID = "Qwen/Qwen3-Reranker-0.6B"
@@ -55,10 +61,7 @@ class HybridSearchEngine:
         self.reranker_model_name = model_name or os.getenv(
             "RERANKER_MODEL_ID", QWEN_RERANKER_ID
         )
-        print(
-            f"[reranker] Loading {self.reranker_model_name} on device={self.device}",
-            flush=True,
-        )
+        started_at = time.perf_counter()
         self.reranker_tokenizer = AutoTokenizer.from_pretrained(
             self.reranker_model_name,
             trust_remote_code=True,
@@ -89,6 +92,14 @@ class HybridSearchEngine:
         )
         self._repo_indexes: Dict[int, dict] = {}
         self._index_lock = threading.Lock()
+        startup_logger.info(
+            "reranker loaded %s",
+            fields(
+                model=self.reranker_model_name,
+                device=self.device,
+                load_time=f"{time.perf_counter() - started_at:.2f}s",
+            ),
+        )
 
     def build_for_repository(self, repo_id: int, chunks: List[dict]):
         if not chunks:

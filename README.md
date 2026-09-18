@@ -462,6 +462,7 @@ curl -X POST http://localhost:8000/api/query \
 | `AWS_REGION` | `us-east-1` fallback | Amazon Bedrock region |
 | `APP_ENV` | `local` | Runtime environment label |
 | `LOG_LEVEL` | `INFO` | Application/Uvicorn log level |
+| `ENABLE_PROFILING` | `false` | Enable detailed parsing, embedding-batch, GPU, and Qdrant timing logs |
 | `PORT` | `8080` | Direct container/listener port |
 | `BEDROCK_MODEL_ID` | `qwen.qwen3-coder-next` | Bedrock model or inference profile |
 | `QDRANT_URL` | required | Qdrant cluster REST endpoint |

@@ -1,4 +1,3 @@
-import json
 import os
 import statistics
 import time
@@ -7,6 +6,12 @@ from uuid import uuid4
 
 import numpy as np
 from qdrant_client import QdrantClient, models
+
+from src.app_logging import fields, get_logger, profiling_enabled
+
+
+startup_logger = get_logger("startup")
+profile_logger = get_logger("profile")
 
 
 class QdrantVectorStore:
@@ -19,6 +24,7 @@ class QdrantVectorStore:
         api_key: Optional[str] = None,
         timeout_seconds: Optional[int] = None,
         upsert_batch_size: Optional[int] = None,
+        enable_profiling: Optional[bool] = None,
     ):
         self.embedding_dim = int(embedding_dim)
         # Keep the model size and pooling strategy in the collection name.
@@ -32,6 +38,9 @@ class QdrantVectorStore:
         )
         self.timeout_seconds = max(
             1, timeout_seconds or int(os.getenv("QDRANT_TIMEOUT_SECONDS", "60"))
+        )
+        self.enable_profiling = (
+            profiling_enabled() if enable_profiling is None else enable_profiling
         )
 
         if client is None:
@@ -54,6 +63,10 @@ class QdrantVectorStore:
 
         self._collection_ready = False
         self._ensure_collection()
+        startup_logger.info(
+            "Qdrant connected %s",
+            fields(collection=self.collection_name),
+        )
 
     def _ensure_collection(self) -> bool:
         if self.client.collection_exists(collection_name=self.collection_name):
@@ -182,11 +195,6 @@ class QdrantVectorStore:
             total_batches = (
                 total_points + self.upsert_batch_size - 1
             ) // self.upsert_batch_size
-            print(
-                f"[qdrant] Adding batch {batch_number}/{total_batches} "
-                f"points={len(points)} progress={start}/{total_points}",
-                flush=True,
-            )
             request_started_at = time.perf_counter()
             self.client.upsert(
                 collection_name=self.collection_name,
@@ -225,12 +233,9 @@ class QdrantVectorStore:
 
         return ids
 
-    @staticmethod
-    def _log_profile(event: str, **fields) -> None:
-        print(
-            "[profile] " + json.dumps({"event": event, **fields}, sort_keys=True),
-            flush=True,
-        )
+    def _log_profile(self, event: str, **values) -> None:
+        if self.enable_profiling:
+            profile_logger.info("%s", fields(event=event, **values))
 
     def get_repository_chunks(
         self,

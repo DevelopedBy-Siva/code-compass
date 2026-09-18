@@ -1,5 +1,4 @@
 import json
-import logging
 import os
 import re
 import time
@@ -12,15 +11,19 @@ from uuid import uuid4
 import boto3
 from botocore.config import Config as BotoConfig
 
+from src.app_logging import fields, get_logger
 from src.code_parser import CodeParser
+from src.config import Settings
 from src.embeddings import EmbeddingGenerator
 from src.hybrid_search import HybridSearchEngine
 from src.repo_fetcher import RepoFetcher
 from src.vector_store import QdrantVectorStore
-from src.config import Settings
 
 BEDROCK_QWEN_MODEL_ID = os.getenv("BEDROCK_MODEL_ID", "qwen.qwen3-coder-next")
-logger = logging.getLogger("code_compass.conversation")
+index_logger = get_logger("index")
+query_logger = get_logger("query")
+error_logger = get_logger("error")
+profile_logger = get_logger("profile")
 
 
 class SessionCancelledError(RuntimeError):
@@ -69,7 +72,10 @@ class CodebaseRAGSystem:
         self.settings = settings or Settings.from_env()
         self.repo_fetcher = RepoFetcher(base_dir=repo_dir or self.settings.repo_cache_dir)
         self.parser = CodeParser()
-        self.embedder = EmbeddingGenerator(model_name=self.settings.embedding_model_id)
+        self.embedder = EmbeddingGenerator(
+            model_name=self.settings.embedding_model_id,
+            enable_profiling=self.settings.enable_profiling,
+        )
         self.vector_store = QdrantVectorStore(
             embedding_dim=self.embedder.get_embedding_dim(),
             collection_name=self.settings.qdrant_collection,
@@ -77,6 +83,7 @@ class CodebaseRAGSystem:
             api_key=self.settings.qdrant_api_key,
             timeout_seconds=self.settings.qdrant_timeout_seconds,
             upsert_batch_size=self.settings.qdrant_upsert_batch_size,
+            enable_profiling=self.settings.enable_profiling,
         )
         self.hybrid_search = HybridSearchEngine(
             model_name=self.settings.reranker_model_id,
@@ -224,8 +231,6 @@ class CodebaseRAGSystem:
                 if repo is None:
                     raise ValueError("Repository not found")
                 self._ensure_repo_not_cancelled(repo.id)
-                print(f"[indexing] Starting repository index repo_id={repo.id}", flush=True)
-
                 repo.status = "indexing"
                 repo.error_message = None
                 repo.session_expires_at = self._session_expiry()
@@ -244,12 +249,6 @@ class CodebaseRAGSystem:
                 repo.branch = clone_info["branch"]
                 repo.local_path = None
                 self._mark_repo_updated(repo)
-            print(
-                f"[indexing] Repository cloned repo_id={repo.id} branch={repo.branch} "
-                f"path={clone_info['local_path']}",
-                flush=True,
-            )
-
             stage_started_at = time.perf_counter()
             source_files = list(
                 self.repo_fetcher.iter_source_files(
@@ -261,10 +260,6 @@ class CodebaseRAGSystem:
                 time.perf_counter() - stage_started_at
             )
             total_files = len(source_files)
-            print(
-                f"[indexing] Found {total_files} source files for repo_id={repo.id}",
-                flush=True,
-            )
             self._set_progress(
                 repo.id,
                 phase="parsing",
@@ -319,10 +314,6 @@ class CodebaseRAGSystem:
                 raise RuntimeError("No supported source-code chunks were found in this repository")
 
             searchable_texts = [chunk["searchable_text"] for chunk in chunk_payloads]
-            print(
-                f"[indexing] Parsed repo_id={repo.id} files={file_count} chunks={len(searchable_texts)}",
-                flush=True,
-            )
             self._set_progress(
                 repo.id,
                 phase="embedding",
@@ -383,10 +374,6 @@ class CodebaseRAGSystem:
             stage_started_at = time.perf_counter()
             embedding_ids = self.vector_store.add_embeddings(embeddings, vector_metadata)
             timings["qdrant_upserts_seconds"] = time.perf_counter() - stage_started_at
-            print(
-                f"[indexing] Uploaded {len(embedding_ids)} embeddings to vector store for repo_id={repo.id}",
-                flush=True,
-            )
             self._set_progress(
                 repo.id,
                 phase="saving",
@@ -451,16 +438,20 @@ class CodebaseRAGSystem:
                 "chunk_generation_seconds"
             ]
             timings["total_indexing_seconds"] = time.perf_counter() - index_started_at
-            self._log_index_profile(
-                repo.id,
+            self._log_index_summary(
+                repo,
                 timings,
                 filtering_profile,
                 parsing_profile,
+                total_files,
                 len(chunk_payloads),
             )
-            print(f"[indexing] Repository index complete repo_id={repo.id}", flush=True)
         except Exception as exc:
-            print(f"[indexing] Repository index failed repo_id={repo_id} error={exc}", flush=True)
+            if not isinstance(exc, SessionCancelledError):
+                error_logger.exception(
+                    "%s",
+                    fields(operation="index", repo_id=repo_id, exception=exc),
+                )
             recovered_from_cache = False
             if (
                 staged_generation
@@ -470,10 +461,13 @@ class CodebaseRAGSystem:
                 try:
                     self.vector_store.remove_generation(repository_key, staged_generation)
                 except Exception as cleanup_exc:
-                    print(
-                        f"[indexing] Failed to remove staged generation "
-                        f"repo_id={repo_id} error={cleanup_exc}",
-                        flush=True,
+                    index_logger.warning(
+                        "%s",
+                        fields(
+                            operation="index_cleanup",
+                            repo_id=repo_id,
+                            exception=cleanup_exc,
+                        ),
                     )
             fallback_chunks = []
             if "repository_key" in locals():
@@ -505,43 +499,50 @@ class CodebaseRAGSystem:
             if isinstance(exc, SessionCancelledError):
                 return
             if recovered_from_cache:
-                print(
-                    f"[indexing] Re-index failed; restored previous cache repo_id={repo_id}",
-                    flush=True,
+                index_logger.warning(
+                    "%s",
+                    fields(repo_id=repo_id, status="restored_previous_cache"),
                 )
                 return
             raise
 
-    @staticmethod
-    def _log_index_profile(
-        repo_id: int,
+    def _log_index_summary(
+        self,
+        repo: Repository,
         timings: dict,
         filtering_profile: dict,
         parsing_profile: dict,
+        source_file_count: int,
         chunk_count: int,
     ) -> None:
-        payload = {
-            "event": "indexing_summary",
-            "repo_id": repo_id,
-            "chunks": chunk_count,
-            "timings": timings,
-            "filtering": filtering_profile,
-            "parsing": parsing_profile,
-        }
-        print("[profile] " + json.dumps(payload, sort_keys=True), flush=True)
-        labels = (
-            ("Clone", "repository_clone_seconds"),
-            ("Filtering", "repository_filtering_seconds"),
-            ("Parsing", "tree_sitter_parsing_seconds"),
-            ("Chunking", "chunk_generation_seconds"),
-            ("Embedding", "embedding_seconds"),
-            ("Qdrant", "qdrant_upserts_seconds"),
-            ("Metadata", "metadata_persistence_seconds"),
-            ("Total", "total_indexing_seconds"),
+        index_logger.info(
+            "%s",
+            fields(
+                repo=repo.source_url or repo.github_url,
+                files=source_file_count,
+                chunks=chunk_count,
+                total=f"{timings['total_indexing_seconds']:.2f}s",
+            ),
         )
-        print(f"[indexing] Timing summary repo_id={repo_id}", flush=True)
-        for label, key in labels:
-            print(f"{label + ':':<18}{timings.get(key, 0.0):>10.2f}s", flush=True)
+        if self.settings.enable_profiling:
+            parsing_seconds = (
+                parsing_profile["file_read_seconds"]
+                + parsing_profile["tree_sitter_seconds"]
+                + parsing_profile["chunk_generation_seconds"]
+            )
+            profile_logger.info(
+                "%s",
+                fields(
+                    operation="index",
+                    repo_id=repo.id,
+                    parsing=f"{parsing_seconds:.2f}s",
+                    embedding=f"{timings['embedding_seconds']:.2f}s",
+                    qdrant_upload=f"{timings['qdrant_upserts_seconds']:.2f}s",
+                    files_scanned=filtering_profile.get(
+                        "files_scanned", source_file_count
+                    ),
+                ),
+            )
 
     def restore_repository_from_cache(
         self,
@@ -629,6 +630,11 @@ class CodebaseRAGSystem:
 
         normalized_history = self._normalize_history(history or [])
         conversation_plan = self._plan_conversation(question, normalized_history)
+        if conversation_plan.rewritten_query != question:
+            query_logger.info(
+                "%s",
+                fields(rewritten_question=conversation_plan.rewritten_query),
+            )
         trace = {
             "original_query": question,
             "rewritten_query": conversation_plan.rewritten_query,
@@ -640,7 +646,6 @@ class CodebaseRAGSystem:
 
         if conversation_plan.route == "casual":
             answer = self._casual_response(repo, question)
-            self._log_conversation_trace(repo, conversation_plan.route, trace)
             if debug_retrieval:
                 answer["conversation_trace"] = dict(trace)
             return answer
@@ -650,7 +655,6 @@ class CodebaseRAGSystem:
                 repo,
                 conversation_plan.clarification_question,
             )
-            self._log_conversation_trace(repo, conversation_plan.route, trace)
             if debug_retrieval:
                 answer["conversation_trace"] = dict(trace)
             return answer
@@ -795,7 +799,6 @@ class CodebaseRAGSystem:
             rewritten_query=rewritten_query,
             trace=trace,
         )
-        self._log_conversation_trace(repo, conversation_plan.route, trace)
         if debug_retrieval:
             answer["retrieval_debug"] = retrieval_debug
             answer["conversation_trace"] = dict(trace)
@@ -1370,9 +1373,9 @@ Follow-up question:
                     rewrite_prompt=rewrite_prompt,
                 )
         except Exception as exc:
-            logger.warning(
-                "query_rewrite_failed error_type=%s",
-                type(exc).__name__,
+            error_logger.exception(
+                "%s",
+                fields(operation="query_rewrite", exception=exc),
             )
 
         return ConversationPlan(
@@ -1573,25 +1576,6 @@ Follow-up question:
             "repo": self._serialize_repo(repo),
             "response_type": "clarification",
         }
-
-    @staticmethod
-    def _log_conversation_trace(
-        repo: Repository,
-        route: str,
-        trace: dict,
-    ) -> None:
-        logger.info(
-            "conversation_trace=%s",
-            json.dumps(
-                {
-                    "repo_id": repo.id,
-                    "repository": f"{repo.owner}/{repo.name}",
-                    "route": route,
-                    **trace,
-                },
-                ensure_ascii=False,
-            ),
-        )
 
     def _build_retrieval_query(self, question: str, history: List[dict]) -> str:
         normalized = " ".join(question.strip().split())

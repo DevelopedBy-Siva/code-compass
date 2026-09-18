@@ -1,4 +1,3 @@
-import json
 import os
 import statistics
 import time
@@ -9,6 +8,12 @@ import torch
 import torch.nn.functional as F
 from transformers import AutoModel, AutoTokenizer
 
+from src.app_logging import fields, get_logger, profiling_enabled
+
+
+startup_logger = get_logger("startup")
+profile_logger = get_logger("profile")
+
 QWEN_EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-0.6B"
 RETRIEVAL_INSTRUCTION = (
     "Given a codebase question, retrieve source-code and documentation passages "
@@ -17,11 +22,19 @@ RETRIEVAL_INSTRUCTION = (
 
 
 class EmbeddingGenerator:
-    def __init__(self, provider: str = None, model_name: str = None):
+    def __init__(
+        self,
+        provider: str = None,
+        model_name: str = None,
+        enable_profiling: Optional[bool] = None,
+    ):
         self.model_name = model_name or os.getenv(
             "EMBEDDING_MODEL_ID", QWEN_EMBEDDING_MODEL
         )
         self.batch_size = max(1, int(os.getenv("QWEN_EMBEDDING_BATCH_SIZE", "8")))
+        self.enable_profiling = (
+            profiling_enabled() if enable_profiling is None else enable_profiling
+        )
         self.device = self._select_device()
         cuda_available = torch.cuda.is_available()
         if self._requires_cuda() and self.device != "cuda":
@@ -30,9 +43,16 @@ class EmbeddingGenerator:
                 "Check the container CUDA runtime and SageMaker host driver compatibility."
             )
 
-        print(
-            f"[embeddings] Loading {self.model_name} on device={self.device}",
-            flush=True,
+        startup_logger.info(
+            "CUDA %s",
+            fields(
+                available=str(cuda_available).lower(),
+                device=(
+                    torch.cuda.get_device_name(0)
+                    if cuda_available
+                    else self.device
+                ),
+            ),
         )
         started_at = time.perf_counter()
         self.tokenizer = AutoTokenizer.from_pretrained(
@@ -52,9 +72,13 @@ class EmbeddingGenerator:
         self.embedding_dim = int(self.model.config.hidden_size)
         self.model_device = str(next(self.model.parameters()).device)
         elapsed = time.perf_counter() - started_at
-        print(
-            f"[embeddings] Model ready dim={self.embedding_dim} load_time={elapsed:.2f}s",
-            flush=True,
+        startup_logger.info(
+            "embedding model loaded %s",
+            fields(
+                model=self.model_name,
+                dimension=self.embedding_dim,
+                load_time=f"{elapsed:.2f}s",
+            ),
         )
         self._log_profile(
             "embedding_device",
@@ -88,20 +112,10 @@ class EmbeddingGenerator:
             batch = texts[start : start + effective_batch_size]
             batch_number = (start // effective_batch_size) + 1
             total_batches = (total + effective_batch_size - 1) // effective_batch_size
-            print(
-                f"[embeddings] Encoding batch {batch_number}/{total_batches} "
-                f"items={len(batch)} progress={start}/{total}",
-                flush=True,
-            )
             batch_embeddings, profile = self._encode_with_profile(batch)
             all_embeddings.append(batch_embeddings)
             elapsed = profile["total_seconds"]
             completed = min(start + len(batch), total)
-            print(
-                f"[embeddings] Finished batch {batch_number}/{total_batches} "
-                f"elapsed={elapsed:.2f}s progress={completed}/{total}",
-                flush=True,
-            )
             batch_profile = {
                 "batch": batch_number,
                 "total_batches": total_batches,
@@ -118,12 +132,29 @@ class EmbeddingGenerator:
         latencies = [item["total_seconds"] for item in batch_profiles]
         worst_index = max(range(len(latencies)), key=latencies.__getitem__)
         best_index = min(range(len(latencies)), key=latencies.__getitem__)
+        gpu_profile = (
+            {
+                "cuda_available": torch.cuda.is_available(),
+                "gpu_name": (
+                    torch.cuda.get_device_name(0)
+                    if torch.cuda.is_available()
+                    else None
+                ),
+                "gpu_memory_allocated_bytes": max(
+                    item["gpu_memory_allocated_bytes"] for item in batch_profiles
+                ),
+                "gpu_memory_peak_bytes": max(
+                    item["gpu_memory_peak_bytes"] for item in batch_profiles
+                ),
+                "gpu_utilization_percent": self._last_non_null(
+                    item["gpu_utilization_percent"] for item in batch_profiles
+                ),
+            }
+            if self.enable_profiling
+            else {}
+        )
         self.last_profile = {
             "device": self.device,
-            "cuda_available": torch.cuda.is_available(),
-            "gpu_name": (
-                torch.cuda.get_device_name(0) if torch.cuda.is_available() else None
-            ),
             "model_device": self.model_device,
             "batch_size": effective_batch_size,
             "batches": len(batch_profiles),
@@ -134,15 +165,7 @@ class EmbeddingGenerator:
             "median_chunks_per_second": statistics.median(throughputs),
             "worst_batch": batch_profiles[worst_index],
             "best_batch": batch_profiles[best_index],
-            "gpu_memory_allocated_bytes": max(
-                item["gpu_memory_allocated_bytes"] for item in batch_profiles
-            ),
-            "gpu_memory_peak_bytes": max(
-                item["gpu_memory_peak_bytes"] for item in batch_profiles
-            ),
-            "gpu_utilization_percent": self._last_non_null(
-                item["gpu_utilization_percent"] for item in batch_profiles
-            ),
+            **gpu_profile,
         }
         self._log_profile("embedding_summary", **self.last_profile)
         return np.vstack(all_embeddings).astype("float32")
@@ -190,15 +213,17 @@ class EmbeddingGenerator:
         embeddings = self._sanitize_embeddings(embeddings)
         postprocess_seconds = time.perf_counter() - postprocess_started_at
         total_seconds = time.perf_counter() - total_started_at
-        return embeddings, {
+        profile = {
             "tokenize_seconds": tokenize_seconds,
             "transfer_seconds": transfer_seconds,
             "inference_seconds": inference_seconds,
             "postprocess_seconds": postprocess_seconds,
             "total_seconds": total_seconds,
             "chunks_per_second": len(texts) / total_seconds if total_seconds else 0.0,
-            **self._gpu_stats(),
         }
+        if self.enable_profiling:
+            profile.update(self._gpu_stats())
+        return embeddings, profile
 
     @staticmethod
     def _last_token_pool(
@@ -278,9 +303,6 @@ class EmbeddingGenerator:
                 result = value
         return result
 
-    @staticmethod
-    def _log_profile(event: str, **fields) -> None:
-        print(
-            "[profile] " + json.dumps({"event": event, **fields}, sort_keys=True),
-            flush=True,
-        )
+    def _log_profile(self, event: str, **values) -> None:
+        if self.enable_profiling:
+            profile_logger.info("%s", fields(event=event, **values))

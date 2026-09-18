@@ -1,7 +1,6 @@
-import logging
 import os
+import time
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
@@ -10,24 +9,14 @@ from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Qu
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, HttpUrl, ValidationError
 
+from src.app_logging import RequestIdMiddleware, configure_logging, fields, get_logger
 from src.config import Settings
 from src.rag_system import CodebaseRAGSystem
 
 load_dotenv(Path(__file__).with_name(".env"))
-logger = logging.getLogger("code_compass")
-_first_successful_ping_logged = False
-
-
-def _runtime_event(event: str, **fields):
-    details = " ".join(f"{key}={value}" for key, value in fields.items())
-    suffix = f" {details}" if details else ""
-    print(
-        f"{datetime.now(timezone.utc).isoformat(timespec='seconds')} {event}{suffix}",
-        flush=True,
-    )
-
-
-_runtime_event("server_app_imported", pid=os.getpid(), port=os.getenv("PORT", "8080"))
+startup_logger = get_logger("startup")
+query_logger = get_logger("query")
+error_logger = get_logger("error")
 
 
 class RepoIndexRequest(BaseModel):
@@ -61,24 +50,17 @@ class SageMakerInvocation(BaseModel):
 
 @asynccontextmanager
 async def lifespan(application: FastAPI):
-    _runtime_event("lifespan_begin", pid=os.getpid())
     settings = Settings.from_env()
-    logging.basicConfig(
-        level=getattr(logging, settings.log_level, logging.INFO),
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    )
+    configure_logging(settings.log_level)
     application.state.ready = False
-    logger.info("Initializing Code Compass runtime")
+    startup_logger.info("application starting")
     application.state.rag_system = CodebaseRAGSystem(settings=settings)
     application.state.ready = True
-    logger.info("Code Compass runtime is ready")
-    _runtime_event("lifespan_complete", pid=os.getpid())
+    startup_logger.info("application ready")
     try:
         yield
     finally:
         application.state.ready = False
-        _runtime_event("lifespan_shutdown", pid=os.getpid())
-        logger.info("Shutting down Code Compass runtime")
         application.state.rag_system.close()
 
 
@@ -91,6 +73,7 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
     application.state.ready = False
+    application.add_middleware(RequestIdMiddleware)
     application.add_middleware(
         CORSMiddleware,
         allow_origins=list(settings.cors_origins),
@@ -139,12 +122,7 @@ async def health(request: Request):
 @app.get("/ping")
 @app.post("/ping")
 async def sagemaker_health(request: Request):
-    global _first_successful_ping_logged
-    response = _health(request)
-    if request.method == "GET" and not _first_successful_ping_logged:
-        _first_successful_ping_logged = True
-        _runtime_event("first_successful_ping", method=request.method, path=request.url.path)
-    return response
+    return _health(request)
 
 
 @app.get("/api/repos")
@@ -200,18 +178,29 @@ async def query_repository(
     session_id: str = Depends(require_session_id),
     rag_system: CodebaseRAGSystem = Depends(get_rag_system),
 ):
+    started_at = time.perf_counter()
+    question = body.question.strip()
+    query_logger.info("%s", fields(question=question))
     try:
-        return rag_system.answer_question(
+        response = rag_system.answer_question(
             repo_id=body.repo_id,
             session_key=session_id,
-            question=body.question.strip(),
+            question=question,
             top_k=body.top_k,
             history=body.history,
         )
+        query_logger.info(
+            "%s",
+            fields(
+                retrieved=len(response.get("sources", [])),
+                latency=f"{time.perf_counter() - started_at:.2f}s",
+            ),
+        )
+        return response
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
-        logger.exception("Query failed")
+        error_logger.exception("%s", fields(operation="query", exception=exc))
         raise HTTPException(status_code=500, detail="Query failed") from exc
 
 
