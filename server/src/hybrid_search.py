@@ -10,7 +10,7 @@ from rank_bm25 import BM25Okapi
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_./:-]*")
-QWEN_RERANKER_ID = "Qwen/Qwen3-Reranker-4B"
+QWEN_RERANKER_ID = "Qwen/Qwen3-Reranker-0.6B"
 RERANK_INSTRUCTION = (
     "Given a codebase question, determine whether the source passage provides "
     "direct evidence needed to answer it"

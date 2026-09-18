@@ -16,6 +16,10 @@ The project is designed around the parts of code RAG that are easy to underestim
 
 ## Results
 
+> **Model migration note:** The published results below were measured with the
+> previous Qwen3 4B embedding and reranking models. The runtime now uses the
+> 0.6B variants, so these metrics must be refreshed after the next evaluation.
+
 The evaluation suite contains 24 hand-written questions across three real, unfamiliar repositories:
 
 - [Documenso](https://github.com/documenso/documenso) — large TypeScript monorepo
@@ -76,7 +80,7 @@ Public GitHub repository
         Path and intent signals
                  │
                  ▼
-       Qwen3-Reranker-4B
+      Qwen3-Reranker-0.6B
                  │
        Diversity-aware selection
                  │
@@ -99,7 +103,7 @@ Repository clones are deleted after indexing; only chunks, metadata, and embeddi
 
 Every question uses multiple complementary signals:
 
-- **Semantic retrieval** with Qwen3-Embedding-4B for conceptual similarity
+- **Semantic retrieval** with Qwen3-Embedding-0.6B for conceptual similarity
 - **BM25 retrieval** for filenames, symbols, framework terminology, and exact identifiers
 - **Path and intent retrieval** for likely implementation locations
 - **Reciprocal Rank Fusion** to combine independently ranked channels
@@ -108,7 +112,7 @@ The system over-fetches before deduplication so repeated chunks and translated c
 
 ### 3. Model-based reranking
 
-Qwen3-Reranker-4B scores query–chunk pairs using the model's native `yes`/`no` relevance format. Candidates are processed in configurable GPU batches and then combined with lexical, semantic, path, and canonical-source signals.
+Qwen3-Reranker-0.6B scores query–chunk pairs using the model's native `yes`/`no` relevance format. Candidates are processed in configurable GPU batches and then combined with lexical, semantic, path, and canonical-source signals.
 
 The final selector limits repeated chunks from the same file and adds source diversity for cross-file questions.
 
@@ -186,8 +190,8 @@ The cases are defined in [`server/evals/sample_eval_set.json`](server/evals/samp
 | Frontend | React 19, Tailwind CSS, Axios |
 | API | FastAPI, Pydantic, Uvicorn |
 | Parsing | tree-sitter, language-specific syntax trees, fallback text chunking |
-| Retrieval | Qwen3-Embedding-4B, Chroma, BM25, Reciprocal Rank Fusion |
-| Reranking | Qwen3-Reranker-4B, PyTorch, Hugging Face Transformers |
+| Retrieval | Qwen3-Embedding-0.6B, Chroma, BM25, Reciprocal Rank Fusion |
+| Reranking | Qwen3-Reranker-0.6B, PyTorch, Hugging Face Transformers |
 | Generation | Qwen3-Coder-Next through Amazon Bedrock |
 | Infrastructure | Docker-ready backend, Vercel-ready frontend |
 
@@ -302,7 +306,7 @@ code-compass/
 - Only public GitHub repositories are supported.
 - Repository metadata and active session state are held in memory.
 - Large repositories take time to parse and embed.
-- Running two local 4B models requires meaningful RAM or GPU memory.
+- Running two local models still benefits substantially from CUDA acceleration.
 - Model-based reranking improves quality but remains the largest retrieval-time cost.
 - The system does not yet build a call graph or dependency graph.
 - The benchmark is a focused regression suite; broader repository and language coverage is still needed.

@@ -7,7 +7,7 @@ import torch
 import torch.nn.functional as F
 from transformers import AutoModel, AutoTokenizer
 
-QWEN_EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-4B"
+QWEN_EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-0.6B"
 RETRIEVAL_INSTRUCTION = (
     "Given a codebase question, retrieve source-code and documentation passages "
     "that provide the most direct evidence for the answer"

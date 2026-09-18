@@ -34,8 +34,8 @@ FastAPI backend for Code Compass, a personal full-stack RAG project that indexes
 
 ### Model Stack
 - LLM: Amazon Bedrock with Qwen3-Coder-Next
-- Embeddings: local Qwen3-Embedding-4B
-- Reranker: local Qwen3-Reranker-4B
+- Embeddings: local Qwen3-Embedding-0.6B
+- Reranker: local Qwen3-Reranker-0.6B
 - Required AWS configuration: `AWS_REGION` or `AWS_DEFAULT_REGION`
 
 ## Chroma Storage
@@ -45,7 +45,7 @@ The backend uses Chroma DB for vector storage in both local development and prod
 Configuration:
 
 - `CHROMA_PATH=./data/chroma`
-- `CHROMA_COLLECTION=repo_qa_chunks`
+- `CHROMA_COLLECTION=repo_qa_chunks_qwen3_0_6b_last_token_v1`
 - `CHROMA_UPSERT_BATCH_SIZE=64`
 
 ## Metrics
