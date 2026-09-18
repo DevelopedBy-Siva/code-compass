@@ -6,6 +6,28 @@ import { awsCredentialsProvider } from "@vercel/oidc-aws-credentials-provider";
 
 const decoder = new TextDecoder();
 
+function getPathSegments(req) {
+  const queryPath = req.query.path;
+  const fromQuery = Array.isArray(queryPath)
+    ? queryPath
+    : typeof queryPath === "string"
+      ? queryPath.split("/")
+      : [];
+
+  const querySegments = fromQuery
+    .flatMap((part) => String(part).split("/"))
+    .filter(Boolean);
+  if (querySegments.length > 0) {
+    return querySegments;
+  }
+
+  const requestPath = new URL(req.url, "http://localhost").pathname;
+  return requestPath
+    .replace(/^\/api\/?/, "")
+    .split("/")
+    .filter(Boolean);
+}
+
 function getClient() {
   const roleArn = process.env.AWS_ROLE_ARN;
   const region = process.env.SAGEMAKER_AWS_REGION || process.env.AWS_REGION;
@@ -23,9 +45,7 @@ function getClient() {
 }
 
 function mapRequest(req) {
-  const path = Array.isArray(req.query.path)
-    ? req.query.path
-    : [req.query.path].filter(Boolean);
+  const path = getPathSegments(req);
   const sessionId = req.headers["x-session-id"] || req.query.session_id;
   if (!sessionId) {
     return { error: [400, "Missing session id"] };
