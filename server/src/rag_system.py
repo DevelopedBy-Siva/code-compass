@@ -7,14 +7,16 @@ from typing import Dict, List, Optional
 from uuid import uuid4
 
 import boto3
+from botocore.config import Config as BotoConfig
 
 from src.code_parser import CodeParser
 from src.embeddings import EmbeddingGenerator
 from src.hybrid_search import HybridSearchEngine
 from src.repo_fetcher import RepoFetcher
 from src.vector_store import QdrantVectorStore
+from src.config import Settings
 
-BEDROCK_QWEN_MODEL_ID = "qwen.qwen3-coder-next"
+BEDROCK_QWEN_MODEL_ID = os.getenv("BEDROCK_MODEL_ID", "qwen.qwen3-coder-next")
 
 
 class SessionCancelledError(RuntimeError):
@@ -50,20 +52,30 @@ class CodebaseRAGSystem:
         self,
         repo_dir: str = None,
         clear_existing_index: bool = False,
+        settings: Settings = None,
     ):
-        self.repo_fetcher = RepoFetcher(base_dir=repo_dir)
+        self.settings = settings or Settings.from_env()
+        self.repo_fetcher = RepoFetcher(base_dir=repo_dir or self.settings.repo_cache_dir)
         self.parser = CodeParser()
-        self.embedder = EmbeddingGenerator()
+        self.embedder = EmbeddingGenerator(model_name=self.settings.embedding_model_id)
         self.vector_store = QdrantVectorStore(
             embedding_dim=self.embedder.get_embedding_dim(),
+            collection_name=self.settings.qdrant_collection,
+            url=self.settings.qdrant_url,
+            api_key=self.settings.qdrant_api_key,
+            timeout_seconds=self.settings.qdrant_timeout_seconds,
+            upsert_batch_size=self.settings.qdrant_upsert_batch_size,
         )
-        self.hybrid_search = HybridSearchEngine()
-        self.app_env = os.getenv("APP_ENV", os.getenv("ENVIRONMENT", "local")).lower()
+        self.hybrid_search = HybridSearchEngine(
+            model_name=self.settings.reranker_model_id,
+            batch_size=self.settings.rerank_batch_size,
+        )
+        self.app_env = self.settings.app_env
         self.llm_provider = "bedrock"
         self.llm_client = None
-        self.llm_model = BEDROCK_QWEN_MODEL_ID
+        self.llm_model = self.settings.bedrock_model_id
         self._configure_llm()
-        self.session_ttl_minutes = int(os.getenv("SESSION_TTL_MINUTES", "120"))
+        self.session_ttl_minutes = self.settings.session_ttl_minutes
         self.repo_lock = RLock()
         self.repositories: Dict[int, Repository] = {}
         self.repository_registry: Dict[str, int] = {}
@@ -784,8 +796,17 @@ Do not leave the answer unfinished.
     def _configure_llm(self):
         self.llm_client = boto3.client(
             "bedrock-runtime",
-            region_name=os.getenv("AWS_REGION", os.getenv("AWS_DEFAULT_REGION", "us-east-1")),
+            region_name=self.settings.aws_region,
+            config=BotoConfig(
+                connect_timeout=5,
+                read_timeout=70,
+                retries={"max_attempts": 3, "mode": "standard"},
+            ),
         )
+
+    def close(self):
+        self.vector_store.save()
+        self.vector_store.close()
 
     def _generate_markdown_response(self, system_prompt: str, user_prompt: str) -> tuple[str, str]:
         response = self.llm_client.converse(

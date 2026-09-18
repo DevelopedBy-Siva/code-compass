@@ -16,7 +16,9 @@ RETRIEVAL_INSTRUCTION = (
 
 class EmbeddingGenerator:
     def __init__(self, provider: str = None, model_name: str = None):
-        self.model_name = QWEN_EMBEDDING_MODEL
+        self.model_name = model_name or os.getenv(
+            "EMBEDDING_MODEL_ID", QWEN_EMBEDDING_MODEL
+        )
         self.batch_size = max(1, int(os.getenv("QWEN_EMBEDDING_BATCH_SIZE", "8")))
         self.device = self._select_device()
 

@@ -50,22 +50,24 @@ def tokenize(text: str) -> List[str]:
 
 
 class HybridSearchEngine:
-    def __init__(self):
+    def __init__(self, model_name: str = None, batch_size: int = None):
         self.device = self._select_device()
-        self.reranker_model_name = QWEN_RERANKER_ID
+        self.reranker_model_name = model_name or os.getenv(
+            "RERANKER_MODEL_ID", QWEN_RERANKER_ID
+        )
         print(
-            f"[reranker] Loading {QWEN_RERANKER_ID} on device={self.device}",
+            f"[reranker] Loading {self.reranker_model_name} on device={self.device}",
             flush=True,
         )
         self.reranker_tokenizer = AutoTokenizer.from_pretrained(
-            QWEN_RERANKER_ID,
+            self.reranker_model_name,
             trust_remote_code=True,
             padding_side="left",
         )
         if self.reranker_tokenizer.pad_token is None:
             self.reranker_tokenizer.pad_token = self.reranker_tokenizer.eos_token
         self.reranker = AutoModelForCausalLM.from_pretrained(
-            QWEN_RERANKER_ID,
+            self.reranker_model_name,
             trust_remote_code=True,
             torch_dtype=torch.float16 if self.device == "cuda" else torch.float32,
         ).to(self.device)
@@ -81,7 +83,10 @@ class HybridSearchEngine:
             RERANK_SUFFIX,
             add_special_tokens=False,
         )
-        self.rerank_batch_size = max(1, int(os.getenv("RAG_RERANK_BATCH_SIZE", "4")))
+        self.rerank_batch_size = max(
+            1,
+            batch_size or int(os.getenv("RAG_RERANK_BATCH_SIZE", "4")),
+        )
         self._repo_indexes: Dict[int, dict] = {}
         self._index_lock = threading.Lock()
 

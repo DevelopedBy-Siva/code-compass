@@ -12,6 +12,10 @@ class QdrantVectorStore:
         embedding_dim: int,
         client: Optional[QdrantClient] = None,
         collection_name: Optional[str] = None,
+        url: Optional[str] = None,
+        api_key: Optional[str] = None,
+        timeout_seconds: Optional[int] = None,
+        upsert_batch_size: Optional[int] = None,
     ):
         self.embedding_dim = int(embedding_dim)
         # Keep the model size and pooling strategy in the collection name.
@@ -21,21 +25,19 @@ class QdrantVectorStore:
             "code_compass_qwen3_embedding_0_6b_last_token_cache_v2",
         )
         self.upsert_batch_size = max(
-            1,
-            int(os.getenv("QDRANT_UPSERT_BATCH_SIZE", "64")),
+            1, upsert_batch_size or int(os.getenv("QDRANT_UPSERT_BATCH_SIZE", "64"))
         )
         self.timeout_seconds = max(
-            1,
-            int(os.getenv("QDRANT_TIMEOUT_SECONDS", "60")),
+            1, timeout_seconds or int(os.getenv("QDRANT_TIMEOUT_SECONDS", "60"))
         )
 
         if client is None:
-            self.url = os.getenv("QDRANT_URL", "").strip()
+            self.url = (url if url is not None else os.getenv("QDRANT_URL", "")).strip()
             if not self.url:
                 raise RuntimeError(
                     "QDRANT_URL is required. Set it to your Qdrant cluster endpoint."
                 )
-            api_key = os.getenv("QDRANT_API_KEY", "").strip() or None
+            api_key = api_key or os.getenv("QDRANT_API_KEY", "").strip() or None
             self.client = QdrantClient(
                 url=self.url,
                 api_key=api_key,
@@ -346,6 +348,11 @@ class QdrantVectorStore:
     def save(self):
         # Qdrant persists successful writes server-side.
         return None
+
+    def close(self):
+        close = getattr(self.client, "close", None)
+        if close:
+            close()
 
     def load(self):
         self._ensure_collection()

@@ -1,14 +1,11 @@
----
-title: Code Compass API
-colorFrom: blue
-colorTo: indigo
-sdk: docker
-app_port: 7860
----
-
 # Code Compass Backend
 
 FastAPI backend for Code Compass, a personal full-stack RAG project that indexes public GitHub repositories and answers questions with grounded source citations.
+
+The production container implements the SageMaker real-time inference contract
+on port 8080 with `/ping` and `/invocations`. See the repository root
+`README.md` for the complete AWS deployment guide, IAM requirements, scripts,
+Vercel adapter, configuration reference, and engineering review.
 
 ## What This Demonstrates
 
