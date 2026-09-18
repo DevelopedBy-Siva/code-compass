@@ -1,38 +1,26 @@
-name: Test and deploy backend to SageMaker
+name: CI/CD pipeline
 
 on:
   push:
-    branches: [main]
-    paths:
-      - "server/**"
-      - "scripts/**"
-      - ".github/workflows/deploy-sagemaker.yml"
+  pull_request:
   workflow_dispatch:
 
 permissions:
   contents: read
-  id-token: write
 
 concurrency:
-  group: code-compass-production
+  group: code-compass-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
-jobs:
-  test-and-deploy:
-    runs-on: ubuntu-latest
-    environment: production
-    env:
-      AWS_REGION: ${{ secrets.AWS_REGION }}
-      ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
-      SAGEMAKER_ENDPOINT_NAME: ${{ secrets.SAGEMAKER_ENDPOINT_NAME }}
-      SAGEMAKER_EXECUTION_ROLE_ARN: ${{ secrets.SAGEMAKER_EXECUTION_ROLE_ARN }}
-      SAGEMAKER_INSTANCE_TYPE: ${{ secrets.SAGEMAKER_INSTANCE_TYPE }}
-      QDRANT_URL: ${{ secrets.QDRANT_URL }}
-      QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
-      CORS_ORIGINS: ${{ secrets.CORS_ORIGINS }}
-      BEDROCK_MODEL_ID: ${{ secrets.BEDROCK_MODEL_ID }}
-      IMAGE_TAG: ${{ github.sha }}
+env:
+  IMAGE_NAME: code-compass-backend
+  IMAGE_TAG: ${{ github.sha }}
 
+jobs:
+  unit-tests:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -46,6 +34,7 @@ jobs:
 
       - name: Install backend dependencies
         run: |
+          python -m pip install --upgrade pip
           pip install torch==2.5.1 --index-url https://download.pytorch.org/whl/cpu
           pip install -r server/requirements.txt
 
@@ -53,17 +42,221 @@ jobs:
         working-directory: server
         run: python -m unittest discover -s tests -v
 
+  docker-build:
+    name: Build production image
+    needs: unit-tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Build production Docker image
+        run: ./scripts/build.sh
+
+      - name: Package image for downstream jobs
+        run: docker save "$IMAGE_NAME:$IMAGE_TAG" | zstd -T0 -1 -o /tmp/code-compass-image.tar.zst
+
+      - name: Upload image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: production-image-${{ github.sha }}
+          path: /tmp/code-compass-image.tar.zst
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
+
+  sagemaker-parity-test:
+    name: SageMaker parity test
+    needs: docker-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      AWS_REGION: us-east-1
+      CORS_ORIGINS: http://localhost:3000
+      QDRANT_API_KEY: local-ci-key
+      SKIP_IMAGE_BUILD: "1"
+    services:
+      qdrant:
+        image: qdrant/qdrant:v1.15.5
+        ports:
+          - 6333:6333
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Download production image
+        uses: actions/download-artifact@v4
+        with:
+          name: production-image-${{ github.sha }}
+          path: /tmp
+
+      - name: Load production image
+        run: zstd -dc /tmp/code-compass-image.tar.zst | docker load
+
+      - name: Configure local parity services
+        run: |
+          curl --fail --silent --show-error \
+            --retry 10 --retry-delay 2 --retry-connrefused \
+            http://127.0.0.1:6333/readyz
+          qdrant_host="$(docker network inspect bridge --format '{{(index .IPAM.Config 0).Gateway}}')"
+          printf 'QDRANT_URL=http://%s:6333\n' "$qdrant_host" >> "$GITHUB_ENV"
+
+      - name: Run local SageMaker compatibility test
+        run: ./scripts/test-local-sagemaker.sh
+
+  push-ecr:
+    name: Push verified image to Amazon ECR
+    needs: sagemaker-parity-test
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    permissions:
+      contents: read
+      id-token: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: production
+    env:
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+      ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Download verified image
+        uses: actions/download-artifact@v4
+        with:
+          name: production-image-${{ github.sha }}
+          path: /tmp
+
+      - name: Load verified image
+        run: zstd -dc /tmp/code-compass-image.tar.zst | docker load
+
       - name: Configure temporary AWS credentials through GitHub OIDC
         uses: aws-actions/configure-aws-credentials@v6.3.0
         with:
           role-to-assume: ${{ secrets.AWS_GITHUB_ROLE_ARN }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      - name: Run local SageMaker compatibility tests
-        run: ./scripts/test-local-sagemaker.sh
-
       - name: Push image to ECR
         run: ./scripts/push.sh
 
-      - name: Deploy SageMaker endpoint
+  deploy-sagemaker:
+    name: Deploy SageMaker endpoint
+    needs: push-ecr
+    permissions:
+      contents: read
+      id-token: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    environment: production
+    env:
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+      ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+      SAGEMAKER_ENDPOINT_NAME: ${{ secrets.SAGEMAKER_ENDPOINT_NAME }}
+      SAGEMAKER_EXECUTION_ROLE_ARN: ${{ secrets.SAGEMAKER_EXECUTION_ROLE_ARN }}
+      SAGEMAKER_INSTANCE_TYPE: ${{ secrets.SAGEMAKER_INSTANCE_TYPE }}
+      QDRANT_URL: ${{ secrets.QDRANT_URL }}
+      QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
+      CORS_ORIGINS: ${{ secrets.CORS_ORIGINS }}
+      BEDROCK_MODEL_ID: ${{ secrets.BEDROCK_MODEL_ID }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Configure temporary AWS credentials through GitHub OIDC
+        uses: aws-actions/configure-aws-credentials@v6.3.0
+        with:
+          role-to-assume: ${{ secrets.AWS_GITHUB_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Create or update endpoint and wait for InService
         run: ./scripts/deploy.sh
+
+      - name: Collect deployment failure diagnostics
+        if: ${{ failure() }}
+        run: |
+          set +e
+          endpoint_description="$(aws sagemaker describe-endpoint \
+            --region "$AWS_REGION" \
+            --endpoint-name "$SAGEMAKER_ENDPOINT_NAME" \
+            --output json 2>&1)"
+          printf '%s\n' '--- SageMaker endpoint description ---' "$endpoint_description"
+          printf '%s\n' '--- SageMaker FailureReason ---'
+          jq -r '.FailureReason // "No FailureReason reported"' <<< "$endpoint_description" 2>/dev/null \
+            || printf '%s\n' 'Endpoint description was unavailable.'
+          log_group="/aws/sagemaker/Endpoints/$SAGEMAKER_ENDPOINT_NAME"
+          log_stream="$(aws logs describe-log-streams \
+            --region "$AWS_REGION" --log-group-name "$log_group" \
+            --order-by LastEventTime --descending --max-items 1 \
+            --query 'logStreams[0].logStreamName' --output text 2>&1)"
+          stream_status=$?
+          printf '%s\n' "--- Newest CloudWatch log stream: $log_stream ---"
+          if [[ $stream_status -eq 0 && -n "$log_stream" && "$log_stream" != "None" ]]; then
+            aws logs get-log-events \
+              --region "$AWS_REGION" --log-group-name "$log_group" \
+              --log-stream-name "$log_stream" --limit 100 --no-start-from-head \
+              --query 'events[].message' --output text
+          else
+            printf '%s\n' 'No CloudWatch log stream was available.'
+          fi
+
+  smoke-test:
+    name: Smoke test live endpoint
+    needs: deploy-sagemaker
+    permissions:
+      contents: read
+      id-token: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+    env:
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+      SAGEMAKER_ENDPOINT_NAME: ${{ secrets.SAGEMAKER_ENDPOINT_NAME }}
+    steps:
+      - name: Configure temporary AWS credentials through GitHub OIDC
+        uses: aws-actions/configure-aws-credentials@v6.3.0
+        with:
+          role-to-assume: ${{ secrets.AWS_GITHUB_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Invoke deployed endpoint
+        run: |
+          response_file="$RUNNER_TEMP/sagemaker-smoke-response.json"
+          aws sagemaker-runtime invoke-endpoint \
+            --region "$AWS_REGION" \
+            --endpoint-name "$SAGEMAKER_ENDPOINT_NAME" \
+            --content-type application/json \
+            --cli-binary-format raw-in-base64-out \
+            --body '{"action":"list_repositories","session_id":"deployment-smoke-test","payload":{}}' \
+            "$response_file"
+          printf '%s\n' 'SageMaker smoke-test response:'
+          jq . "$response_file"
+
+      - name: Print failure reason and latest CloudWatch logs
+        if: ${{ failure() }}
+        run: |
+          set +e
+          endpoint_description="$(aws sagemaker describe-endpoint \
+            --region "$AWS_REGION" \
+            --endpoint-name "$SAGEMAKER_ENDPOINT_NAME" \
+            --output json 2>&1)"
+          printf '%s\n' '--- SageMaker endpoint description ---' "$endpoint_description"
+          printf '%s\n' '--- SageMaker FailureReason ---'
+          jq -r '.FailureReason // "No FailureReason reported"' <<< "$endpoint_description" 2>/dev/null \
+            || printf '%s\n' 'Endpoint description was unavailable.'
+          log_group="/aws/sagemaker/Endpoints/$SAGEMAKER_ENDPOINT_NAME"
+          log_stream="$(aws logs describe-log-streams \
+            --region "$AWS_REGION" --log-group-name "$log_group" \
+            --order-by LastEventTime --descending --max-items 1 \
+            --query 'logStreams[0].logStreamName' --output text 2>&1)"
+          stream_status=$?
+          printf '%s\n' "--- Newest CloudWatch log stream: $log_stream ---"
+          if [[ $stream_status -eq 0 && -n "$log_stream" && "$log_stream" != "None" ]]; then
+            printf '%s\n' '--- Last 100 CloudWatch log lines ---'
+            aws logs get-log-events \
+              --region "$AWS_REGION" --log-group-name "$log_group" \
+              --log-stream-name "$log_stream" --limit 100 --no-start-from-head \
+              --query 'events[].message' --output text
+          else
+            printf '%s\n' 'No CloudWatch log stream was available.'
+          fi

@@ -50,8 +50,16 @@ print_logs() {
 
 trap cleanup EXIT
 
-printf 'Building local SageMaker parity image %s:%s\n' "$image_name" "$image_tag"
-"$repo_root/scripts/build.sh"
+if [[ "${SKIP_IMAGE_BUILD:-0}" == "1" ]]; then
+  if ! docker image inspect "$image_name:$image_tag" >/dev/null 2>&1; then
+    printf 'Pre-built image %s:%s was not found\n' "$image_name" "$image_tag" >&2
+    exit 1
+  fi
+  printf 'Using pre-built SageMaker parity image %s:%s\n' "$image_name" "$image_tag"
+else
+  printf 'Building local SageMaker parity image %s:%s\n' "$image_name" "$image_tag"
+  "$repo_root/scripts/build.sh"
+fi
 
 cleanup
 
