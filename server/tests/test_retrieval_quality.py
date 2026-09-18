@@ -4,7 +4,9 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import torch
+from qdrant_client import QdrantClient
 
 
 SERVER_ROOT = Path(__file__).resolve().parents[1]
@@ -16,6 +18,7 @@ from src.code_parser import CodeParser
 from src.embeddings import EmbeddingGenerator, RETRIEVAL_INSTRUCTION
 from src.hybrid_search import HybridSearchEngine, RERANK_SUFFIX
 from src.rag_system import CodebaseRAGSystem
+from src.vector_store import QdrantVectorStore
 
 
 class _FakeReranker:
@@ -117,6 +120,121 @@ class RetrievalPipelineTests(unittest.TestCase):
         names = {chunk["symbol_name"] for chunk in chunks}
         self.assertIn("QuerySet", names)
         self.assertIn("QuerySet.filter", names)
+
+
+class QdrantVectorStoreTests(unittest.TestCase):
+    def test_repository_cache_generation_is_replaced_only_after_activation(self):
+        client = QdrantClient(location=":memory:")
+        store = QdrantVectorStore(
+            embedding_dim=3,
+            client=client,
+            collection_name="test_code_compass",
+        )
+        store.upsert_batch_size = 1
+        metadata = [
+            {
+                "repository_key": "github:owner/repo@main",
+                "cache_generation": "generation-1",
+                "cache_ready": False,
+                "file_path": "src/relevant.py",
+                "symbol_name": "relevant",
+                "signature": "def relevant():",
+                "content": "relevant implementation",
+                "searchable_text": "src relevant implementation",
+            },
+            {
+                "repository_key": "github:owner/repo@main",
+                "cache_generation": "generation-1",
+                "cache_ready": False,
+                "file_path": "src/secondary.py",
+                "symbol_name": "secondary",
+                "signature": "def secondary():",
+                "content": "secondary implementation",
+                "searchable_text": "src secondary implementation",
+            },
+            {
+                "repository_key": "github:owner/other@main",
+                "cache_generation": "other-generation",
+                "cache_ready": True,
+                "file_path": "src/other.py",
+                "symbol_name": "other",
+                "signature": "def other():",
+                "content": "other implementation",
+                "searchable_text": "src other implementation",
+            },
+        ]
+        ids = store.add_embeddings(
+            np.array(
+                [
+                    [1.0, 0.0, 0.0],
+                    [0.0, 0.0, 1.0],
+                    [0.0, 1.0, 0.0],
+                ],
+                dtype="float32",
+            ),
+            metadata,
+        )
+
+        self.assertEqual(len(ids), 3)
+        self.assertEqual(store.get_stats()["total_vectors"], 3)
+        self.assertEqual(store.get_repository_chunks("github:owner/repo@main"), [])
+
+        store.activate_repository_generation(
+            "github:owner/repo@main",
+            "generation-1",
+        )
+
+        hits = store.search(
+            np.array([1.0, 0.0, 0.0], dtype="float32"),
+            k=5,
+            repository_key="github:owner/repo@main",
+        )
+        self.assertEqual(len(hits), 2)
+        self.assertEqual(hits[0][1]["file_path"], "src/relevant.py")
+
+        restored = store.get_repository_chunks("github:owner/repo@main")
+        self.assertEqual(len(restored), 2)
+        self.assertEqual(
+            {chunk["content"] for chunk in restored},
+            {"relevant implementation", "secondary implementation"},
+        )
+
+        store.add_embeddings(
+            np.array([[0.0, 1.0, 0.0]], dtype="float32"),
+            [
+                {
+                    "repository_key": "github:owner/repo@main",
+                    "cache_generation": "generation-2",
+                    "cache_ready": False,
+                    "file_path": "src/replacement.py",
+                    "symbol_name": "replacement",
+                    "signature": "def replacement():",
+                    "content": "replacement implementation",
+                    "searchable_text": "src replacement implementation",
+                }
+            ],
+        )
+        self.assertEqual(
+            {chunk["file_path"] for chunk in store.get_repository_chunks("github:owner/repo@main")},
+            {"src/relevant.py", "src/secondary.py"},
+        )
+
+        store.activate_repository_generation(
+            "github:owner/repo@main",
+            "generation-2",
+        )
+        self.assertEqual(
+            [chunk["file_path"] for chunk in store.get_repository_chunks("github:owner/repo@main")],
+            ["src/replacement.py"],
+        )
+        self.assertEqual(store.get_stats()["total_vectors"], 2)
+
+        store.delete_repository_cache("github:owner/repo@main")
+        self.assertEqual(store.get_repository_chunks("github:owner/repo@main"), [])
+        self.assertEqual(store.get_stats()["total_vectors"], 1)
+
+        store.clear()
+        self.assertEqual(store.get_stats()["total_vectors"], 0)
 
 
 if __name__ == "__main__":

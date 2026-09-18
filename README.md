@@ -22,6 +22,10 @@ The evaluation suite contains 24 hand-written questions across three real, unfam
 - [FastAPI](https://github.com/fastapi/fastapi) — Python API framework
 - [Django](https://github.com/django/django) — large Python web framework
 
+> The results below validate the 0.6B model stack. Re-run the benchmark after
+> the Qdrant migration before treating the numbers as validated for the new
+> vector-store backend.
+
 ### Retrieval improvement
 
 | Metric | Baseline | Optimized | Change |
@@ -70,6 +74,8 @@ Public GitHub repository
           ▼               ▼
  Qwen3 embeddings       BM25
           │               │
+          ▼               │
+ Qdrant vector search     │
           └──────┬────────┘
                  ▼
        Reciprocal Rank Fusion
@@ -95,6 +101,8 @@ The backend shallow-clones a public repository, ignores generated and dependency
 Tree-sitter creates chunks around functions, classes, methods, declarations, and containers. Large classes receive compact overview chunks while their methods remain independently searchable. Each parsed source file also receives a module overview containing its path, role, imports, exports, and symbols. Plain-text and unsupported-language files use bounded fallback chunking.
 
 Repository clones are deleted after indexing; only chunks, metadata, and embeddings remain.
+
+Qdrant is also the persistent repository cache. A canonical repository-and-branch key lets a new browser session reuse a completed index without cloning or embedding the repository again. The landing-page **Re-index repository** switch is off by default. Turning it on builds a new, hidden generation; only after every vector is stored does the backend activate it and delete the previous generation. A failed rebuild therefore leaves the last working cache intact.
 
 ### 2. Hybrid candidate retrieval
 
@@ -187,7 +195,7 @@ The cases are defined in [`server/evals/sample_eval_set.json`](server/evals/samp
 | Frontend | React 19, Tailwind CSS, Axios |
 | API | FastAPI, Pydantic, Uvicorn |
 | Parsing | tree-sitter, language-specific syntax trees, fallback text chunking |
-| Retrieval | Qwen3-Embedding-0.6B, Chroma, BM25, Reciprocal Rank Fusion |
+| Retrieval | Qwen3-Embedding-0.6B, Qdrant, BM25, Reciprocal Rank Fusion |
 | Reranking | Qwen3-Reranker-0.6B, PyTorch, Hugging Face Transformers |
 | Generation | Qwen3-Coder-Next through Amazon Bedrock |
 | Infrastructure | Docker-ready backend, Vercel-ready frontend |
@@ -210,7 +218,8 @@ pip install -r server/requirements.txt
 
 cd server
 export AWS_REGION=us-east-1
-export CHROMA_PATH=./data/chroma
+export QDRANT_URL=https://your-cluster.us-east.aws.cloud.qdrant.io:6333
+export QDRANT_API_KEY=your-qdrant-api-key
 python server_app.py
 ```
 
@@ -239,11 +248,25 @@ All repository operations are scoped by an `X-Session-Id` header.
 
 | Method | Endpoint | Purpose |
 |---|---|---|
-| `POST` | `/api/repos/index` | Clone and asynchronously index a repository |
+| `POST` | `/api/repos/index` | Reuse a cached index or asynchronously build one |
 | `GET` | `/api/repos` | List repositories for the current session |
 | `GET` | `/api/repos/{repo_id}` | Read indexing status and metadata |
 | `POST` | `/api/query` | Ask a grounded question about an indexed repository |
-| `POST` | `/api/session/end` | Delete session-scoped repository data |
+| `POST` | `/api/session/end` | Clear session state; persistent Qdrant vectors remain cached |
+
+Index a repository, reusing its cache by default:
+
+```bash
+curl -X POST http://localhost:8000/api/repos/index \
+  -H 'Content-Type: application/json' \
+  -H 'X-Session-Id: portfolio-demo-session' \
+  -d '{
+    "github_url": "https://github.com/fastapi/fastapi",
+    "reindex": false
+  }'
+```
+
+Set `reindex` to `true` to force a safe replacement of the stored index.
 
 Example query:
 
@@ -264,9 +287,12 @@ curl -X POST http://localhost:8000/api/query \
 | Variable | Default | Purpose |
 |---|---|---|
 | `AWS_REGION` | `us-east-1` fallback | Amazon Bedrock region |
-| `CHROMA_PATH` | `./data/chroma` | Persistent vector-store directory |
-| `CHROMA_COLLECTION` | versioned default | Chroma collection override |
-| `CHROMA_UPSERT_BATCH_SIZE` | `64` | Chroma indexing batch size |
+| `QDRANT_URL` | required | Qdrant cluster REST endpoint |
+| `QDRANT_API_KEY` | none | Qdrant Cloud API key; omit only for an unsecured local instance |
+| `QDRANT_COLLECTION` | versioned default | Qdrant collection override |
+| `QDRANT_EVAL_COLLECTION` | versioned eval default | Isolated collection used by the evaluation runner |
+| `QDRANT_UPSERT_BATCH_SIZE` | `64` | Qdrant indexing batch size |
+| `QDRANT_TIMEOUT_SECONDS` | `60` | Qdrant client request timeout |
 | `CORS_ORIGINS` | `http://localhost:3000` | Comma-separated allowed origins |
 | `SESSION_TTL_MINUTES` | `120` | Session lifetime |
 | `QWEN_EMBEDDING_BATCH_SIZE` | `8` | Embedding batch size |
@@ -290,7 +316,7 @@ code-compass/
 │   │   ├── hybrid_search.py      # BM25, RRF, and reranking
 │   │   ├── rag_system.py         # Indexing, retrieval, and generation orchestration
 │   │   ├── repo_fetcher.py       # GitHub cloning and file filtering
-│   │   └── vector_store.py       # Chroma persistence and search
+│   │   └── vector_store.py       # Qdrant persistence and search
 │   └── tests/
 │       └── test_retrieval_quality.py
 ├── ui/

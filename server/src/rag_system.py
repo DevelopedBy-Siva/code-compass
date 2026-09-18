@@ -2,8 +2,9 @@ import os
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from threading import RLock
+from threading import Lock, RLock
 from typing import Dict, List, Optional
+from uuid import uuid4
 
 import boto3
 
@@ -11,7 +12,7 @@ from src.code_parser import CodeParser
 from src.embeddings import EmbeddingGenerator
 from src.hybrid_search import HybridSearchEngine
 from src.repo_fetcher import RepoFetcher
-from src.vector_store import ChromaVectorStore
+from src.vector_store import QdrantVectorStore
 
 BEDROCK_QWEN_MODEL_ID = "qwen.qwen3-coder-next"
 
@@ -30,6 +31,10 @@ class Repository:
     owner: str
     name: str
     branch: str = "main"
+    repository_key: str = ""
+    cache_generation: Optional[str] = None
+    cache_hit: bool = False
+    reindex_requested: bool = False
     local_path: Optional[str] = None
     status: str = "queued"
     error_message: Optional[str] = None
@@ -44,16 +49,13 @@ class CodebaseRAGSystem:
     def __init__(
         self,
         repo_dir: str = None,
-        index_path: str = None,
-        clear_existing_index: bool = True,
+        clear_existing_index: bool = False,
     ):
         self.repo_fetcher = RepoFetcher(base_dir=repo_dir)
         self.parser = CodeParser()
         self.embedder = EmbeddingGenerator()
-        self.vector_store = ChromaVectorStore(
+        self.vector_store = QdrantVectorStore(
             embedding_dim=self.embedder.get_embedding_dim(),
-            index_path=index_path or "./data/chroma",
-            persist=True,
         )
         self.hybrid_search = HybridSearchEngine()
         self.app_env = os.getenv("APP_ENV", os.getenv("ENVIRONMENT", "local")).lower()
@@ -69,6 +71,7 @@ class CodebaseRAGSystem:
         self.indexing_progress: Dict[int, dict] = {}
         self.repo_chunks: Dict[int, List[dict]] = {}
         self.cancelled_repo_ids = set()
+        self.index_locks: Dict[str, Lock] = {}
         if clear_existing_index:
             self.rebuild_indexes()
         else:
@@ -88,13 +91,29 @@ class CodebaseRAGSystem:
             self.indexing_progress.clear()
             self.cancelled_repo_ids.clear()
 
-    def create_or_reset_repository(self, github_url: str, session_key: str) -> Repository:
+    def create_or_reset_repository(
+        self,
+        github_url: str,
+        session_key: str,
+        reindex: bool = False,
+    ) -> Repository:
         info = self.repo_fetcher.parse_github_url(github_url)
-        registry_key = self._build_registry_key(session_key, github_url)
+        repository_key = self._build_repository_key(info)
+        registry_key = self._build_registry_key(session_key, repository_key)
+        cached_chunks = (
+            []
+            if reindex
+            else self.vector_store.get_repository_chunks(repository_key)
+        )
         with self.repo_lock:
             self._cleanup_expired_sessions()
             repo_id = self.repository_registry.get(registry_key)
             repo = self.repositories.get(repo_id) if repo_id else None
+            if repo is not None and repo.status in {"queued", "indexing"} and not reindex:
+                repo.session_expires_at = self._session_expiry()
+                self._mark_repo_updated(repo)
+                return repo
+
             if repo is None:
                 repo = Repository(
                     id=self.next_repo_id,
@@ -105,6 +124,7 @@ class CodebaseRAGSystem:
                     owner=info["owner"],
                     name=info["repo"],
                     branch=info["branch"],
+                    repository_key=repository_key,
                     status="queued",
                 )
                 self.next_repo_id += 1
@@ -118,21 +138,51 @@ class CodebaseRAGSystem:
                 repo.owner = info["owner"]
                 repo.name = info["repo"]
                 repo.branch = info["branch"]
-                repo.status = "queued"
-                repo.error_message = None
-                repo.file_count = 0
-                repo.chunk_count = 0
-                repo.indexed_at = None
+                repo.repository_key = repository_key
                 self._mark_repo_updated(repo)
                 self.cancelled_repo_ids.discard(repo.id)
-                self.hybrid_search.remove_repository(repo.id)
-                self.vector_store.remove_repository(repo.id)
-                self.repo_chunks.pop(repo.id, None)
+
+            repo.reindex_requested = bool(reindex)
+            repo.error_message = None
+            self.indexing_progress.pop(repo.id, None)
+
+            if cached_chunks:
+                self._hydrate_repository(repo, cached_chunks, cache_hit=True)
+            else:
+                repo.status = "queued"
+                repo.cache_hit = False
+                if not reindex:
+                    repo.file_count = 0
+                    repo.chunk_count = 0
+                    repo.indexed_at = None
+                    repo.cache_generation = None
+                    self.hybrid_search.remove_repository(repo.id)
+                    self.repo_chunks.pop(repo.id, None)
 
             return repo
 
     def index_repository(self, repo_id: int):
+        with self.repo_lock:
+            repo = self.repositories.get(repo_id)
+            if repo is None:
+                return
+            index_lock = self.index_locks.setdefault(repo.repository_key, Lock())
+
+        with index_lock:
+            with self.repo_lock:
+                repo = self.repositories.get(repo_id)
+                if repo is None:
+                    return
+                # Another session may have finished indexing the same
+                # repository while this task waited for the per-repo lock.
+                if repo.status == "indexed" and not repo.reindex_requested:
+                    return
+            self._index_repository(repo_id)
+
+    def _index_repository(self, repo_id: int):
         clone_info = None
+        staged_generation = None
+        generation_activated = False
         try:
             with self.repo_lock:
                 self._cleanup_expired_sessions()
@@ -146,6 +196,8 @@ class CodebaseRAGSystem:
                 repo.error_message = None
                 repo.session_expires_at = self._session_expiry()
                 self._mark_repo_updated(repo)
+                repository_key = repo.repository_key
+                staged_generation = str(uuid4())
 
             self._set_progress(repo.id, phase="cloning", message="Cloning repository")
 
@@ -202,6 +254,9 @@ class CodebaseRAGSystem:
                     discovered_chunks=len(chunk_payloads),
                 )
 
+            if not chunk_payloads:
+                raise RuntimeError("No supported source-code chunks were found in this repository")
+
             searchable_texts = [chunk["searchable_text"] for chunk in chunk_payloads]
             print(
                 f"[indexing] Parsed repo_id={repo.id} files={file_count} chunks={len(searchable_texts)}",
@@ -232,12 +287,20 @@ class CodebaseRAGSystem:
             )
             self._ensure_repo_not_cancelled(repo.id)
 
+            indexed_at = datetime.utcnow()
+
             vector_metadata = []
             for chunk in chunk_payloads:
                 vector_metadata.append(
                     {
-                        "repository_id": repo.id,
+                        "repository_key": repository_key,
+                        "cache_generation": staged_generation,
+                        "cache_ready": False,
+                        "indexed_at": indexed_at.isoformat(),
                         "source_url": repo.source_url or repo.github_url,
+                        "owner": repo.owner,
+                        "repository_name": repo.name,
+                        "branch": repo.branch,
                         "file_path": chunk["file_path"],
                         "language": chunk["language"],
                         "symbol_name": chunk["symbol_name"],
@@ -269,40 +332,77 @@ class CodebaseRAGSystem:
                 row = {
                     **chunk,
                     "id": embedding_id,
-                    "repository_id": repo.id,
                     "embedding_id": embedding_id,
                 }
                 created_rows.append(row)
 
             serialized = [self._serialize_chunk(chunk) for chunk in created_rows]
+            self._ensure_repo_not_cancelled(repo.id)
+            self.vector_store.activate_repository_generation(
+                repository_key,
+                staged_generation,
+            )
+            generation_activated = True
             with self.repo_lock:
-                self._ensure_repo_still_exists(repo.id)
-                self._ensure_repo_not_cancelled(repo.id)
-                repo.status = "indexed"
-                repo.file_count = file_count
-                repo.chunk_count = len(created_rows)
-                repo.indexed_at = datetime.utcnow()
-                repo.session_expires_at = self._session_expiry()
-                self._mark_repo_updated(repo)
-                self.repo_chunks[repo.id] = serialized
-            self.hybrid_search.build_for_repository(repo.id, serialized)
+                matching_repositories = [
+                    item
+                    for item in self.repositories.values()
+                    if item.repository_key == repository_key
+                ]
+                for item in matching_repositories:
+                    item.status = "indexed"
+                    item.error_message = None
+                    item.file_count = file_count
+                    item.chunk_count = len(created_rows)
+                    item.indexed_at = indexed_at
+                    item.cache_generation = staged_generation
+                    item.cache_hit = item.id != repo.id
+                    item.reindex_requested = False
+                    item.branch = repo.branch
+                    item.session_expires_at = self._session_expiry()
+                    self._mark_repo_updated(item)
+                    self.repo_chunks[item.id] = list(serialized)
+                    self.indexing_progress.pop(item.id, None)
+            for item in matching_repositories:
+                self.hybrid_search.build_for_repository(item.id, serialized)
             self.vector_store.save()
             with self.repo_lock:
-                self.indexing_progress.pop(repo.id, None)
                 self.cancelled_repo_ids.discard(repo.id)
             self.repo_fetcher.cleanup_repository(clone_info["local_path"])
             print(f"[indexing] Repository index complete repo_id={repo.id}", flush=True)
         except Exception as exc:
             print(f"[indexing] Repository index failed repo_id={repo_id} error={exc}", flush=True)
-            self.vector_store.remove_repository(repo_id)
-            self.hybrid_search.remove_repository(repo_id)
+            recovered_from_cache = False
+            if (
+                staged_generation
+                and not generation_activated
+                and "repository_key" in locals()
+            ):
+                try:
+                    self.vector_store.remove_generation(repository_key, staged_generation)
+                except Exception as cleanup_exc:
+                    print(
+                        f"[indexing] Failed to remove staged generation "
+                        f"repo_id={repo_id} error={cleanup_exc}",
+                        flush=True,
+                    )
+            fallback_chunks = []
+            if "repository_key" in locals():
+                try:
+                    fallback_chunks = self.vector_store.get_repository_chunks(repository_key)
+                except Exception:
+                    fallback_chunks = []
             with self.repo_lock:
-                self.repo_chunks.pop(repo_id, None)
                 repo = self.repositories.get(repo_id)
                 if repo:
                     if repo_id in self.cancelled_repo_ids:
                         self._delete_repositories([repo], track_cancellation=False)
+                    elif fallback_chunks:
+                        self._hydrate_repository(repo, fallback_chunks, cache_hit=True)
+                        recovered_from_cache = True
                     else:
+                        self.hybrid_search.remove_repository(repo_id)
+                        self.repo_chunks.pop(repo_id, None)
                         repo.status = "failed"
                         repo.error_message = str(exc)
                         self._mark_repo_updated(repo)
@@ -315,6 +415,12 @@ class CodebaseRAGSystem:
                 self.indexing_progress.pop(repo_id, None)
             if isinstance(exc, SessionCancelledError):
                 return
+            if recovered_from_cache:
+                print(
+                    f"[indexing] Re-index failed; restored previous cache repo_id={repo_id}",
+                    flush=True,
+                )
+                return
             raise
 
     def restore_repository_from_cache(
@@ -323,19 +429,13 @@ class CodebaseRAGSystem:
         session_key: str,
         repo_id: int,
     ) -> Optional[int]:
-        chunks = self.vector_store.get_repository_chunks(repo_id)
+        info = self.repo_fetcher.parse_github_url(github_url)
+        repository_key = self._build_repository_key(info)
+        chunks = self.vector_store.get_repository_chunks(repository_key)
         if not chunks:
             return None
-        cached_source_urls = {
-            chunk.get("source_url")
-            for chunk in chunks
-            if chunk.get("source_url")
-        }
-        if cached_source_urls and github_url not in cached_source_urls:
-            return None
 
-        info = self.repo_fetcher.parse_github_url(github_url)
-        registry_key = self._build_registry_key(session_key, github_url)
+        registry_key = self._build_registry_key(session_key, repository_key)
         repo = Repository(
             id=repo_id,
             github_url=registry_key,
@@ -345,20 +445,16 @@ class CodebaseRAGSystem:
             owner=info["owner"],
             name=info["repo"],
             branch=info["branch"],
-            status="indexed",
-            file_count=len({chunk.get("file_path") for chunk in chunks if chunk.get("file_path")}),
-            chunk_count=len(chunks),
-            indexed_at=datetime.utcnow(),
+            repository_key=repository_key,
         )
 
         with self.repo_lock:
             self.repositories[repo.id] = repo
             self.repository_registry[registry_key] = repo.id
-            self.repo_chunks[repo.id] = chunks
             self.next_repo_id = max(self.next_repo_id, repo.id + 1)
             self.cancelled_repo_ids.discard(repo.id)
+            self._hydrate_repository(repo, chunks, cache_hit=True)
 
-        self.hybrid_search.build_for_repository(repo.id, chunks)
         return repo.id
 
     def list_repositories(self) -> List[dict]:
@@ -438,7 +534,11 @@ class CodebaseRAGSystem:
         query_embedding = self.embedder.embed_text(retrieval_query)
 
         semantic_hits = []
-        for score, meta in self.vector_store.search(query_embedding, k=fetch_depth, repo_filter=repo_id):
+        for score, meta in self.vector_store.search(
+            query_embedding,
+            k=fetch_depth,
+            repository_key=repo.repository_key,
+        ):
             serialized = dict(meta)
             serialized["semantic_score"] = score
             semantic_hits.append(serialized)
@@ -843,6 +943,8 @@ Do not leave the answer unfinished.
             "owner": repo.owner,
             "name": repo.name,
             "branch": repo.branch,
+            "cache_hit": repo.cache_hit,
+            "reindex_requested": repo.reindex_requested,
             "local_path": repo.local_path,
             "status": repo.status,
             "error_message": repo.error_message,
@@ -893,7 +995,6 @@ Do not leave the answer unfinished.
             if track_cancellation:
                 self.cancelled_repo_ids.add(repo_id)
             self.hybrid_search.remove_repository(repo_id)
-            self.vector_store.remove_repository(repo_id)
             self.repo_chunks.pop(repo_id, None)
             self.indexing_progress.pop(repo_id, None)
             repo = self.repositories.pop(repo_id, None)
@@ -1784,8 +1885,51 @@ Do not leave the answer unfinished.
         return datetime.utcnow() + timedelta(minutes=self.session_ttl_minutes)
 
     @staticmethod
-    def _build_registry_key(session_key: str, github_url: str) -> str:
-        return f"{session_key}::{github_url}"
+    def _build_repository_key(info: dict) -> str:
+        owner = str(info["owner"]).strip().lower()
+        name = str(info["repo"]).strip().lower()
+        branch = str(info.get("branch") or "main").strip()
+        return f"github:{owner}/{name}@{branch}"
+
+    @staticmethod
+    def _build_registry_key(session_key: str, repository_key: str) -> str:
+        return f"{session_key}::{repository_key}"
+
+    def _hydrate_repository(
+        self,
+        repo: Repository,
+        chunks: List[dict],
+        cache_hit: bool,
+    ) -> None:
+        serialized = [self._serialize_chunk(chunk) for chunk in chunks]
+        first = chunks[0]
+        repo.status = "indexed"
+        repo.error_message = None
+        repo.file_count = len(
+            {chunk.get("file_path") for chunk in chunks if chunk.get("file_path")}
+        )
+        repo.chunk_count = len(serialized)
+        repo.indexed_at = self._parse_cached_datetime(first.get("indexed_at"))
+        repo.cache_generation = str(first.get("cache_generation") or "") or None
+        repo.cache_hit = cache_hit
+        repo.reindex_requested = False
+        repo.branch = str(first.get("branch") or repo.branch)
+        repo.session_expires_at = self._session_expiry()
+        self._mark_repo_updated(repo)
+        self.repo_chunks[repo.id] = serialized
+        self.indexing_progress.pop(repo.id, None)
+        self.hybrid_search.build_for_repository(repo.id, serialized)
+
+    @staticmethod
+    def _parse_cached_datetime(value) -> datetime:
+        if value:
+            try:
+                return datetime.fromisoformat(str(value).replace("Z", "+00:00")).replace(
+                    tzinfo=None
+                )
+            except ValueError:
+                pass
+        return datetime.utcnow()
 
     @staticmethod
     def _serialize_chunk(chunk: dict) -> dict:

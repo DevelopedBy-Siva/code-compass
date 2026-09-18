@@ -1,48 +1,126 @@
 import os
-from pathlib import Path
 from typing import List, Optional, Tuple
 from uuid import uuid4
 
 import numpy as np
-from chromadb import Client
-from chromadb.config import Settings
+from qdrant_client import QdrantClient, models
 
 
-class ChromaVectorStore:
-    def __init__(self, embedding_dim: int, index_path: str = None, persist: bool = True):
-        self.embedding_dim = embedding_dim
-        # Keep the model size and pooling strategy in the default collection
-        # name. Vectors from another model or pooling strategy are not
-        # compatible and must never be mixed with the current query vectors.
-        self.collection_name = os.getenv(
-            "CHROMA_COLLECTION",
-            "repo_qa_chunks_qwen3_0_6b_last_token_v1",
+class QdrantVectorStore:
+    def __init__(
+        self,
+        embedding_dim: int,
+        client: Optional[QdrantClient] = None,
+        collection_name: Optional[str] = None,
+    ):
+        self.embedding_dim = int(embedding_dim)
+        # Keep the model size and pooling strategy in the collection name.
+        # Vectors from another model or pooling strategy are incompatible.
+        self.collection_name = collection_name or os.getenv(
+            "QDRANT_COLLECTION",
+            "code_compass_qwen3_embedding_0_6b_last_token_cache_v2",
         )
-        self.upsert_batch_size = max(1, int(os.getenv("CHROMA_UPSERT_BATCH_SIZE", "64")))
-        self.persist_path = os.getenv("CHROMA_PATH", index_path or "./data/chroma")
-        self.persist = persist
-        self.client = self._create_client()
-        self.collection = self._ensure_collection()
+        self.upsert_batch_size = max(
+            1,
+            int(os.getenv("QDRANT_UPSERT_BATCH_SIZE", "64")),
+        )
+        self.timeout_seconds = max(
+            1,
+            int(os.getenv("QDRANT_TIMEOUT_SECONDS", "60")),
+        )
 
-    def _create_client(self):
-        if self.persist:
-            Path(self.persist_path).mkdir(parents=True, exist_ok=True)
-            return Client(
-                Settings(
-                    is_persistent=True,
-                    persist_directory=self.persist_path,
-                    anonymized_telemetry=False,
+        if client is None:
+            self.url = os.getenv("QDRANT_URL", "").strip()
+            if not self.url:
+                raise RuntimeError(
+                    "QDRANT_URL is required. Set it to your Qdrant cluster endpoint."
                 )
+            api_key = os.getenv("QDRANT_API_KEY", "").strip() or None
+            self.client = QdrantClient(
+                url=self.url,
+                api_key=api_key,
+                timeout=self.timeout_seconds,
+            )
+        else:
+            # Dependency injection keeps unit tests independent of cloud
+            # credentials while exercising the same Qdrant operations.
+            self.url = None
+            self.client = client
+
+        self._collection_ready = False
+        self._ensure_collection()
+
+    def _ensure_collection(self) -> bool:
+        if self.client.collection_exists(collection_name=self.collection_name):
+            collection = self.client.get_collection(
+                collection_name=self.collection_name,
+            )
+            self._validate_collection_dimension(collection)
+            self._ensure_repository_payload_index(collection)
+            self._collection_ready = True
+            return True
+
+        # The evaluation runner asks for a cached-vector count before loading
+        # the embedding model. At that point its dimension is intentionally 0;
+        # report an empty store and let the fully initialized RAG system create
+        # the collection with the real dimension.
+        if self.embedding_dim <= 0:
+            self._collection_ready = False
+            return False
+
+        self.client.create_collection(
+            collection_name=self.collection_name,
+            vectors_config=models.VectorParams(
+                size=self.embedding_dim,
+                distance=models.Distance.COSINE,
+            ),
+        )
+        collection = self.client.get_collection(
+            collection_name=self.collection_name,
+        )
+        self._ensure_repository_payload_index(collection)
+        self._collection_ready = True
+        return True
+
+    def _ensure_repository_payload_index(self, collection) -> None:
+        payload_schema = getattr(collection, "payload_schema", None) or {}
+        required_indexes = {
+            "repository_key": models.PayloadSchemaType.KEYWORD,
+            "cache_generation": models.PayloadSchemaType.KEYWORD,
+            "cache_ready": models.PayloadSchemaType.BOOL,
+        }
+        for field_name, field_schema in required_indexes.items():
+            if field_name in payload_schema:
+                continue
+            self.client.create_payload_index(
+                collection_name=self.collection_name,
+                field_name=field_name,
+                field_schema=field_schema,
+                wait=True,
             )
 
-        return Client(Settings(anonymized_telemetry=False))
+    def _validate_collection_dimension(self, collection) -> None:
+        if self.embedding_dim <= 0:
+            return
+        vector_config = collection.config.params.vectors
+        existing_dim = getattr(vector_config, "size", None)
+        if existing_dim is None and isinstance(vector_config, dict):
+            default_config = vector_config.get("")
+            existing_dim = getattr(default_config, "size", None)
+        if existing_dim is not None and int(existing_dim) != self.embedding_dim:
+            raise RuntimeError(
+                f"Qdrant collection {self.collection_name!r} uses vector dimension "
+                f"{existing_dim}, but the embedding model produces {self.embedding_dim}. "
+                "Use a new QDRANT_COLLECTION name and re-index."
+            )
 
-    def _ensure_collection(self):
-        return self.client.get_or_create_collection(
-            name=self.collection_name,
-            embedding_function=None,
-            metadata={"hnsw:space": "cosine"},
-        )
+    def _require_collection(self) -> None:
+        if self._collection_ready:
+            return
+        if not self._ensure_collection():
+            raise RuntimeError(
+                "Cannot create the Qdrant collection without a positive embedding dimension."
+            )
 
     def add_embeddings(self, embeddings: np.ndarray, metadata: List[dict]) -> List[str]:
         if embeddings.size == 0:
@@ -51,71 +129,104 @@ class ChromaVectorStore:
         embeddings = embeddings.astype("float32")
         if embeddings.ndim == 1:
             embeddings = embeddings.reshape(1, -1)
+        if embeddings.ndim != 2:
+            raise ValueError("Embeddings must be a one- or two-dimensional array")
+        if len(metadata) != embeddings.shape[0]:
+            raise ValueError(
+                "Embedding and metadata counts differ: "
+                f"{embeddings.shape[0]} embeddings for {len(metadata)} metadata rows"
+            )
+        if self.embedding_dim > 0 and embeddings.shape[1] != self.embedding_dim:
+            raise ValueError(
+                f"Embedding dimension {embeddings.shape[1]} does not match "
+                f"the configured dimension {self.embedding_dim}"
+            )
         if not np.isfinite(embeddings).all():
             bad_rows = np.where(~np.isfinite(embeddings).all(axis=1))[0][:10].tolist()
             raise ValueError(f"Embeddings contain NaN or Infinity values at rows: {bad_rows}")
 
-        ids = [uuid4().hex for _ in metadata]
+        self._require_collection()
+        ids = [str(uuid4()) for _ in metadata]
         total_points = len(ids)
 
         for start in range(0, total_points, self.upsert_batch_size):
             end = start + self.upsert_batch_size
             batch_ids = ids[start:end]
-            batch_embeddings = embeddings[start:end].tolist()
-            batch_metadata = []
-            batch_documents = []
+            batch_embeddings = embeddings[start:end]
+            batch_metadata = metadata[start:end]
+            points = []
 
-            for idx, meta in zip(batch_ids, metadata[start:end]):
-                payload = self._sanitize_metadata(meta)
-                payload["id"] = idx
-                batch_metadata.append(payload)
-                batch_documents.append(str(meta.get("content") or ""))
+            for point_id, vector, meta in zip(
+                batch_ids,
+                batch_embeddings,
+                batch_metadata,
+            ):
+                payload = self._sanitize_payload(meta)
+                payload["id"] = point_id
+                points.append(
+                    models.PointStruct(
+                        id=point_id,
+                        vector=vector.tolist(),
+                        payload=payload,
+                    )
+                )
 
             batch_number = (start // self.upsert_batch_size) + 1
-            total_batches = (total_points + self.upsert_batch_size - 1) // self.upsert_batch_size
+            total_batches = (
+                total_points + self.upsert_batch_size - 1
+            ) // self.upsert_batch_size
             print(
-                f"[chroma] Adding batch {batch_number}/{total_batches} "
-                f"points={len(batch_ids)} progress={start}/{total_points}",
+                f"[qdrant] Adding batch {batch_number}/{total_batches} "
+                f"points={len(points)} progress={start}/{total_points}",
                 flush=True,
             )
-            self.collection.add(
-                ids=batch_ids,
-                embeddings=batch_embeddings,
-                metadatas=batch_metadata,
-                documents=batch_documents,
+            self.client.upsert(
+                collection_name=self.collection_name,
+                points=points,
+                wait=True,
             )
 
         return ids
 
-    def get_repository_chunks(self, repo_id: int) -> List[dict]:
+    def get_repository_chunks(
+        self,
+        repository_key: str,
+        generation: Optional[str] = None,
+        ready_only: bool = True,
+    ) -> List[dict]:
+        if not self._collection_ready and not self._ensure_collection():
+            return []
+
         chunks = []
-        offset = 0
-        limit = self.upsert_batch_size
+        offset = None
+        repository_filter = self._repository_filter(
+            repository_key,
+            generation=generation,
+            ready_only=ready_only,
+        )
 
         while True:
-            results = self.collection.get(
-                where={"repository_id": repo_id},
-                include=["documents", "metadatas"],
-                limit=limit,
+            records, next_offset = self.client.scroll(
+                collection_name=self.collection_name,
+                scroll_filter=repository_filter,
+                limit=self.upsert_batch_size,
                 offset=offset,
+                with_payload=True,
+                with_vectors=False,
             )
-            ids = results.get("ids") or []
-            documents = results.get("documents") or []
-            metadatas = results.get("metadatas") or []
-            if not ids:
-                break
-
-            for idx, document, meta in zip(ids, documents, metadatas):
-                payload = dict(meta or {})
-                payload["id"] = payload.get("id") or idx
-                payload["repository_id"] = repo_id
-                payload["content"] = document or payload.get("content") or ""
-                payload.setdefault("searchable_text", self._build_searchable_text(payload))
+            for record in records:
+                payload = dict(record.payload or {})
+                payload["id"] = payload.get("id") or str(record.id)
+                payload["content"] = str(payload.get("content") or "")
+                payload.setdefault(
+                    "searchable_text",
+                    self._build_searchable_text(payload),
+                )
                 chunks.append(payload)
 
-            if len(ids) < limit:
+            if next_offset is None:
                 break
-            offset += limit
+            offset = next_offset
 
         return chunks
 
@@ -123,64 +234,165 @@ class ChromaVectorStore:
         self,
         query_embedding: np.ndarray,
         k: int = 10,
-        repo_filter: Optional[int] = None,
+        repository_key: Optional[str] = None,
     ) -> List[Tuple[float, dict]]:
+        if not self._collection_ready and not self._ensure_collection():
+            return []
         if query_embedding.ndim == 1:
             query_embedding = query_embedding.reshape(1, -1)
         query_embedding = query_embedding.astype("float32")
+        if query_embedding.ndim != 2 or query_embedding.shape[0] != 1:
+            raise ValueError("Query embedding must contain exactly one vector")
+        if self.embedding_dim > 0 and query_embedding.shape[1] != self.embedding_dim:
+            raise ValueError(
+                f"Query dimension {query_embedding.shape[1]} does not match "
+                f"the configured dimension {self.embedding_dim}"
+            )
+        if not np.isfinite(query_embedding).all():
+            raise ValueError("Query embedding contains NaN or Infinity values")
 
-        where = {"repository_id": repo_filter} if repo_filter is not None else None
-        results = self.collection.query(
-            query_embeddings=[query_embedding[0].tolist()],
-            n_results=k,
-            where=where,
-            include=["documents", "metadatas", "distances"],
+        query_filter = (
+            self._repository_filter(repository_key)
+            if repository_key is not None
+            else None
+        )
+        response = self.client.query_points(
+            collection_name=self.collection_name,
+            query=query_embedding[0].tolist(),
+            query_filter=query_filter,
+            limit=max(1, int(k)),
+            with_payload=True,
+            with_vectors=False,
         )
 
-        ids = (results.get("ids") or [[]])[0]
-        documents = (results.get("documents") or [[]])[0]
-        metadatas = (results.get("metadatas") or [[]])[0]
-        distances = (results.get("distances") or [[]])[0]
-
         hits = []
-        for idx, document, meta, distance in zip(ids, documents, metadatas, distances):
-            payload = dict(meta or {})
-            payload["id"] = payload.get("id") or idx
-            payload["content"] = document or ""
-            hits.append((self._distance_to_score(distance), payload))
+        for point in response.points:
+            payload = dict(point.payload or {})
+            payload["id"] = payload.get("id") or str(point.id)
+            payload["content"] = str(payload.get("content") or "")
+            hits.append((self._normalize_score(point.score), payload))
         return hits
 
-    def remove_repository(self, repo_id: int):
-        self.collection.delete(where={"repository_id": repo_id})
+    def activate_repository_generation(
+        self,
+        repository_key: str,
+        generation: str,
+    ) -> None:
+        """Publish one complete generation, then remove every older generation."""
+        self._require_collection()
+        generation_filter = self._repository_filter(
+            repository_key,
+            generation=generation,
+            ready_only=False,
+        )
+        staged_count = self.client.count(
+            collection_name=self.collection_name,
+            count_filter=generation_filter,
+            exact=True,
+        ).count
+        if staged_count <= 0:
+            raise RuntimeError("Cannot activate an empty repository index")
+
+        self.client.set_payload(
+            collection_name=self.collection_name,
+            payload={"cache_ready": True},
+            points=generation_filter,
+            wait=True,
+        )
+        self.client.delete(
+            collection_name=self.collection_name,
+            points_selector=models.FilterSelector(
+                filter=models.Filter(
+                    must=[self._match("repository_key", repository_key)],
+                    must_not=[self._match("cache_generation", generation)],
+                )
+            ),
+            wait=True,
+        )
+
+    def remove_generation(self, repository_key: str, generation: str) -> None:
+        if not self._collection_ready and not self._ensure_collection():
+            return
+        self.client.delete(
+            collection_name=self.collection_name,
+            points_selector=models.FilterSelector(
+                filter=self._repository_filter(
+                    repository_key,
+                    generation=generation,
+                    ready_only=False,
+                ),
+            ),
+            wait=True,
+        )
+
+    def delete_repository_cache(self, repository_key: str) -> None:
+        if not self._collection_ready and not self._ensure_collection():
+            return
+        self.client.delete(
+            collection_name=self.collection_name,
+            points_selector=models.FilterSelector(
+                filter=self._repository_filter(repository_key, ready_only=False),
+            ),
+            wait=True,
+        )
 
     def clear(self):
-        try:
-            self.client.delete_collection(name=self.collection_name)
-        except Exception:
-            pass
-        self.collection = self._ensure_collection()
+        if self.client.collection_exists(collection_name=self.collection_name):
+            self.client.delete_collection(collection_name=self.collection_name)
+        self._collection_ready = False
+        if self.embedding_dim > 0:
+            self._ensure_collection()
 
     def save(self):
-        persist = getattr(self.client, "persist", None)
-        if callable(persist):
-            persist()
+        # Qdrant persists successful writes server-side.
+        return None
 
     def load(self):
-        self.collection = self._ensure_collection()
+        self._ensure_collection()
 
     def keep_alive(self) -> dict:
-        heartbeat = getattr(self.client, "heartbeat", None)
-        if callable(heartbeat):
-            heartbeat()
+        if self.client.collection_exists(collection_name=self.collection_name):
+            self.client.get_collection(collection_name=self.collection_name)
         return self.get_stats()
 
     def get_stats(self) -> dict:
+        if not self.client.collection_exists(collection_name=self.collection_name):
+            total_vectors = 0
+        else:
+            total_vectors = self.client.count(
+                collection_name=self.collection_name,
+                exact=True,
+            ).count
         return {
-            "total_vectors": self.collection.count(),
+            "total_vectors": int(total_vectors),
             "embedding_dim": self.embedding_dim,
             "collection_name": self.collection_name,
-            "persist_path": self.persist_path if self.persist else None,
+            "provider": "qdrant",
+            "url": self.url,
         }
+
+    @classmethod
+    def _repository_filter(
+        cls,
+        repository_key: str,
+        generation: Optional[str] = None,
+        ready_only: bool = True,
+    ) -> models.Filter:
+        must = [cls._match("repository_key", repository_key)]
+        if generation is not None:
+            must.append(cls._match("cache_generation", generation))
+        if ready_only:
+            must.append(cls._match("cache_ready", True))
+        return models.Filter(
+            must=must,
+        )
+
+    @staticmethod
+    def _match(key: str, value) -> models.FieldCondition:
+        return models.FieldCondition(
+            key=key,
+            match=models.MatchValue(value=value),
+        )
 
     @staticmethod
     def _build_searchable_text(chunk: dict) -> str:
@@ -195,11 +407,9 @@ class ChromaVectorStore:
         )
 
     @staticmethod
-    def _sanitize_metadata(meta: dict) -> dict:
+    def _sanitize_payload(meta: dict) -> dict:
         sanitized = {}
         for key, value in meta.items():
-            if key == "content":
-                continue
             if value is None:
                 sanitized[key] = ""
             elif isinstance(value, (str, int, float, bool)):
@@ -209,7 +419,7 @@ class ChromaVectorStore:
         return sanitized
 
     @staticmethod
-    def _distance_to_score(distance: float) -> float:
-        if distance is None:
+    def _normalize_score(score: float) -> float:
+        if score is None:
             return 0.0
-        return max(0.0, min(1.0, 1.0 - float(distance)))
+        return max(0.0, min(1.0, float(score)))

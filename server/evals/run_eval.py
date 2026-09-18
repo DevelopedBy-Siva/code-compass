@@ -15,8 +15,16 @@ if str(SERVER_ROOT) not in sys.path:
 
 load_dotenv(SERVER_ROOT / ".env")
 
+# Evaluations frequently delete and rebuild their collection. Keep that data
+# isolated from the collection used by the application unless the caller
+# explicitly chooses another evaluation collection.
+os.environ["QDRANT_COLLECTION"] = os.getenv(
+    "QDRANT_EVAL_COLLECTION",
+    "code_compass_eval_qwen3_embedding_0_6b_last_token_cache_v2",
+)
+
 from src.rag_system import BEDROCK_QWEN_MODEL_ID, CodebaseRAGSystem
-from src.vector_store import ChromaVectorStore
+from src.vector_store import QdrantVectorStore
 
 EVAL_SESSION_KEY = "eval-session"
 TOP_K = int(os.getenv("CODEBASE_RAG_TOP_K", "8"))
@@ -98,7 +106,7 @@ def check_llm_available():
 
 def should_reindex_existing_cache(vector_count: int) -> bool:
     if vector_count <= 0:
-        log("No existing Chroma embeddings found; eval will index repositories.")
+        log("No existing Qdrant embeddings found; eval will index repositories.")
         return True
 
     env_choice = os.getenv("CODEBASE_RAG_REINDEX")
@@ -106,7 +114,7 @@ def should_reindex_existing_cache(vector_count: int) -> bool:
         return env_choice.strip().lower() in {"1", "true", "yes", "y"}
 
     prompt = (
-        f"Found {vector_count} existing Chroma embeddings. "
+        f"Found {vector_count} existing Qdrant embeddings. "
         "Restart/re-index from scratch? [y/N]: "
     )
     if not sys.stdin.isatty():
@@ -118,7 +126,7 @@ def should_reindex_existing_cache(vector_count: int) -> bool:
 
 
 def get_cached_vector_count() -> int:
-    store = ChromaVectorStore(embedding_dim=0, persist=True)
+    store = QdrantVectorStore(embedding_dim=0)
     return store.get_stats()["total_vectors"]
 
 
@@ -447,6 +455,8 @@ def run():
         "config": {
             "llm_provider": rag_system.llm_provider,
             "llm_model": rag_system.llm_model,
+            "vector_store": "qdrant",
+            "vector_collection": rag_system.vector_store.collection_name,
             "embedding_model": rag_system.embedder.model_name,
             "embedding_dimension": rag_system.embedder.get_embedding_dim(),
             "reranker_model": rag_system.hybrid_search.reranker_model_name,

@@ -37,6 +37,7 @@ rag_system: Optional[CodebaseRAGSystem] = None
 
 class RepoIndexRequest(BaseModel):
     github_url: HttpUrl
+    reindex: bool = False
 
 
 class QueryRequest(BaseModel):
@@ -105,11 +106,21 @@ async def queue_repository_index(
     session_id: str = Depends(require_session_id),
 ):
     try:
-        repo = rag_system.create_or_reset_repository(str(request.github_url), session_id)
-        background_tasks.add_task(rag_system.index_repository, repo.id)
+        repo = rag_system.create_or_reset_repository(
+            str(request.github_url),
+            session_id,
+            reindex=request.reindex,
+        )
+        cache_hit = repo.status == "indexed" and repo.cache_hit
+        if repo.status != "indexed":
+            background_tasks.add_task(rag_system.index_repository, repo.id)
         return {
             "success": True,
-            "message": "Repository indexing started",
+            "message": (
+                "Loaded the existing repository index"
+                if cache_hit
+                else "Repository indexing started"
+            ),
             "repo": rag_system.get_repository_for_session(repo.id, session_id),
         }
     except Exception as exc:
