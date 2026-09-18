@@ -69,33 +69,55 @@ if ! aws sagemaker describe-endpoint-config \
     --production-variants "$production_variants" >/dev/null
 fi
 
-if aws sagemaker describe-endpoint \
-  --region "$AWS_REGION" \
-  --endpoint-name "$SAGEMAKER_ENDPOINT_NAME" >/dev/null 2>&1; then
-  endpoint_status="$(aws sagemaker describe-endpoint \
-    --region "$AWS_REGION" \
-    --endpoint-name "$SAGEMAKER_ENDPOINT_NAME" \
-    --query EndpointStatus --output text)"
-  if [[ "$endpoint_status" != "InService" && "$endpoint_status" != "Failed" ]]; then
-    aws sagemaker wait endpoint-in-service \
-      --region "$AWS_REGION" \
-      --endpoint-name "$SAGEMAKER_ENDPOINT_NAME"
-  fi
-  current_config="$(aws sagemaker describe-endpoint \
-    --region "$AWS_REGION" \
-    --endpoint-name "$SAGEMAKER_ENDPOINT_NAME" \
-    --query EndpointConfigName --output text)"
-  if [[ "$current_config" != "$endpoint_config_name" ]]; then
-    aws sagemaker update-endpoint \
-      --region "$AWS_REGION" \
-      --endpoint-name "$SAGEMAKER_ENDPOINT_NAME" \
-      --endpoint-config-name "$endpoint_config_name" >/dev/null
-  fi
-else
+create_endpoint() {
   aws sagemaker create-endpoint \
     --region "$AWS_REGION" \
     --endpoint-name "$SAGEMAKER_ENDPOINT_NAME" \
     --endpoint-config-name "$endpoint_config_name" >/dev/null
+}
+
+if endpoint_description="$(aws sagemaker describe-endpoint \
+  --region "$AWS_REGION" \
+  --endpoint-name "$SAGEMAKER_ENDPOINT_NAME" 2>/dev/null)"; then
+  endpoint_status="$(jq -r '.EndpointStatus' <<<"$endpoint_description")"
+
+  if [[ "$endpoint_status" == "Failed" ]]; then
+    printf 'Deleting failed SageMaker endpoint %s before recreating it\n' \
+      "$SAGEMAKER_ENDPOINT_NAME"
+    aws sagemaker delete-endpoint \
+      --region "$AWS_REGION" \
+      --endpoint-name "$SAGEMAKER_ENDPOINT_NAME"
+    aws sagemaker wait endpoint-deleted \
+      --region "$AWS_REGION" \
+      --endpoint-name "$SAGEMAKER_ENDPOINT_NAME"
+    create_endpoint
+  elif [[ "$endpoint_status" == "Deleting" ]]; then
+    printf 'Waiting for SageMaker endpoint %s to finish deleting before recreating it\n' \
+      "$SAGEMAKER_ENDPOINT_NAME"
+    aws sagemaker wait endpoint-deleted \
+      --region "$AWS_REGION" \
+      --endpoint-name "$SAGEMAKER_ENDPOINT_NAME"
+    create_endpoint
+  else
+    if [[ "$endpoint_status" != "InService" ]]; then
+      aws sagemaker wait endpoint-in-service \
+        --region "$AWS_REGION" \
+        --endpoint-name "$SAGEMAKER_ENDPOINT_NAME"
+      endpoint_description="$(aws sagemaker describe-endpoint \
+        --region "$AWS_REGION" \
+        --endpoint-name "$SAGEMAKER_ENDPOINT_NAME")"
+    fi
+
+    current_config="$(jq -r '.EndpointConfigName' <<<"$endpoint_description")"
+    if [[ "$current_config" != "$endpoint_config_name" ]]; then
+      aws sagemaker update-endpoint \
+        --region "$AWS_REGION" \
+        --endpoint-name "$SAGEMAKER_ENDPOINT_NAME" \
+        --endpoint-config-name "$endpoint_config_name" >/dev/null
+    fi
+  fi
+else
+  create_endpoint
 fi
 
 aws sagemaker wait endpoint-in-service \
