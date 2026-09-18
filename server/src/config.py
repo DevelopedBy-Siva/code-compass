@@ -98,7 +98,7 @@ class Settings:
             qdrant_timeout_seconds=_positive_int("QDRANT_TIMEOUT_SECONDS", 60),
             qdrant_upsert_batch_size=_positive_int("QDRANT_UPSERT_BATCH_SIZE", 64),
             qdrant_url=qdrant_url,
-            repo_cache_dir=os.getenv("REPO_CACHE_DIR", "/tmp/codecompass-repos"),
+            repo_cache_dir=os.getenv("REPO_CACHE_DIR", "/opt/ml/codecompass/repos"),
             rerank_batch_size=_positive_int("RAG_RERANK_BATCH_SIZE", 4),
             reranker_model_id=os.getenv(
                 "RERANKER_MODEL_ID", "Qwen/Qwen3-Reranker-0.6B"

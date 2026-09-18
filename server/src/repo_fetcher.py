@@ -2,7 +2,6 @@ import os
 import re
 import shutil
 import subprocess
-import tempfile
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -94,7 +93,7 @@ class RepoFetcher:
     def __init__(self, base_dir: str = None):
         repo_cache_dir = base_dir or os.getenv(
             "REPO_CACHE_DIR",
-            str(Path(tempfile.gettempdir()) / "codecompass-repos"),
+            "/opt/ml/codecompass/repos",
         )
         self.base_dir = Path(repo_cache_dir)
         self.base_dir.mkdir(parents=True, exist_ok=True)

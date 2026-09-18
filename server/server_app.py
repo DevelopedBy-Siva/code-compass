@@ -1,6 +1,7 @@
 import logging
 import os
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
@@ -14,6 +15,19 @@ from src.rag_system import CodebaseRAGSystem
 
 load_dotenv(Path(__file__).with_name(".env"))
 logger = logging.getLogger("code_compass")
+_first_successful_ping_logged = False
+
+
+def _runtime_event(event: str, **fields):
+    details = " ".join(f"{key}={value}" for key, value in fields.items())
+    suffix = f" {details}" if details else ""
+    print(
+        f"{datetime.now(timezone.utc).isoformat(timespec='seconds')} {event}{suffix}",
+        flush=True,
+    )
+
+
+_runtime_event("server_app_imported", pid=os.getpid(), port=os.getenv("PORT", "8080"))
 
 
 class RepoIndexRequest(BaseModel):
@@ -47,6 +61,7 @@ class SageMakerInvocation(BaseModel):
 
 @asynccontextmanager
 async def lifespan(application: FastAPI):
+    _runtime_event("lifespan_begin", pid=os.getpid())
     settings = Settings.from_env()
     logging.basicConfig(
         level=getattr(logging, settings.log_level, logging.INFO),
@@ -57,10 +72,12 @@ async def lifespan(application: FastAPI):
     application.state.rag_system = CodebaseRAGSystem(settings=settings)
     application.state.ready = True
     logger.info("Code Compass runtime is ready")
+    _runtime_event("lifespan_complete", pid=os.getpid())
     try:
         yield
     finally:
         application.state.ready = False
+        _runtime_event("lifespan_shutdown", pid=os.getpid())
         logger.info("Shutting down Code Compass runtime")
         application.state.rag_system.close()
 
@@ -122,7 +139,12 @@ async def health(request: Request):
 @app.get("/ping")
 @app.post("/ping")
 async def sagemaker_health(request: Request):
-    return _health(request)
+    global _first_successful_ping_logged
+    response = _health(request)
+    if request.method == "GET" and not _first_successful_ping_logged:
+        _first_successful_ping_logged = True
+        _runtime_event("first_successful_ping", method=request.method, path=request.url.path)
+    return response
 
 
 @app.get("/api/repos")

@@ -59,8 +59,8 @@ jobs:
           role-to-assume: ${{ secrets.AWS_GITHUB_ROLE_ARN }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      - name: Build image
-        run: ./scripts/build.sh
+      - name: Run local SageMaker compatibility tests
+        run: ./scripts/test-local-sagemaker.sh
 
       - name: Push image to ECR
         run: ./scripts/push.sh

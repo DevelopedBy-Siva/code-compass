@@ -292,10 +292,17 @@ export QDRANT_URL=https://your-cluster.us-east.aws.cloud.qdrant.io:6333
 export QDRANT_API_KEY=your-qdrant-api-key
 export CORS_ORIGINS=https://your-project.vercel.app
 
-./scripts/build.sh
+./scripts/test-local-sagemaker.sh
 ./scripts/push.sh
 ./scripts/deploy.sh
 ```
+
+`test-local-sagemaker.sh` builds the same image used for SageMaker, starts it as
+the production non-root user on port 8080 with SageMaker-style writable mounts,
+records repeated real HTTP `GET /ping` status codes until one returns `200`,
+then calls `/api/health` and verifies `/invocations`. It prints container logs
+and exits non-zero if startup fails, so `push.sh` and `deploy.sh` should only
+run after it passes.
 
 `build.sh` produces a Linux/amd64 image and preloads both Hugging Face model
 snapshots. Set `PRELOAD_MODELS=0` for a faster development build; that image
@@ -321,10 +328,10 @@ rollback. Delete unused versions periodically after confirming a deployment.
 ### GitHub Actions CI/CD
 
 `.github/workflows/deploy-sagemaker.yml` runs on backend/deployment changes to
-`main`: it installs dependencies, runs the backend tests, builds the image,
-pushes it to ECR, and updates the endpoint. It requests `id-token: write` and
-assumes the deployment role using GitHub OIDC; no AWS access-key secrets are
-used.
+`main`: it installs dependencies, runs the backend tests, assumes the deployment
+role, runs the local SageMaker compatibility test, pushes the verified image to
+ECR, and updates the endpoint. It requests `id-token: write` and assumes the
+deployment role using GitHub OIDC; no AWS access-key secrets are used.
 
 Create a protected GitHub environment named `production` with these secrets:
 
@@ -460,7 +467,7 @@ curl -X POST http://localhost:8000/api/query \
 | `QDRANT_TIMEOUT_SECONDS` | `60` | Qdrant client request timeout |
 | `CORS_ORIGINS` | `http://localhost:3000` | Comma-separated allowed origins |
 | `SESSION_TTL_MINUTES` | `120` | Session lifetime |
-| `REPO_CACHE_DIR` | `/tmp/codecompass-repos` | Writable temporary clone directory |
+| `REPO_CACHE_DIR` | `/opt/ml/codecompass/repos` | Writable repository clone cache directory |
 | `EMBEDDING_MODEL_ID` | `Qwen/Qwen3-Embedding-0.6B` | Local embedding model |
 | `QWEN_EMBEDDING_BATCH_SIZE` | `8` | Embedding batch size |
 | `RERANKER_MODEL_ID` | `Qwen/Qwen3-Reranker-0.6B` | Local reranking model |

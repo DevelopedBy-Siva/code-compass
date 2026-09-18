@@ -15,7 +15,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PORT=8080 \
     HF_HOME=/opt/ml/model-cache \
-    REPO_CACHE_DIR=/tmp/codecompass-repos \
+    REPO_CACHE_DIR=/opt/ml/codecompass/repos \
     EMBEDDING_MODEL_ID=${EMBEDDING_MODEL_ID} \
     RERANKER_MODEL_ID=${RERANKER_MODEL_ID}
 
@@ -35,8 +35,8 @@ RUN grep -v '^torch==' /app/requirements.txt > /tmp/container-requirements.txt \
 
 COPY --chown=app:app . /app
 RUN chmod +x /app/entrypoint.sh \
-    && mkdir -p /opt/ml/model-cache /tmp/codecompass-repos \
-    && chown -R app:app /opt/ml/model-cache /tmp/codecompass-repos
+    && mkdir -p /opt/ml/input /opt/ml/model /opt/ml/model-cache /opt/ml/output /opt/ml/codecompass/repos \
+    && chown -R app:app /opt/ml/input /opt/ml/model /opt/ml/model-cache /opt/ml/output /opt/ml/codecompass
 
 USER app
 
