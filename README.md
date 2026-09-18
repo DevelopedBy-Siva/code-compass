@@ -121,7 +121,13 @@ Qwen3-Reranker-0.6B scores query–chunk pairs using the model's native `yes`/`n
 
 The final selector limits repeated chunks from the same file and adds source diversity for cross-file questions.
 
-### 4. Grounded answer generation
+### 4. Conversation orchestration
+
+Before retrieval, the backend routes greetings and social replies directly, rewrites contextual follow-ups into standalone repository questions using recent chat history, and asks a targeted clarification when a reference still has no reliable antecedent. This layer does not alter indexing, embeddings, reranking, or candidate selection.
+
+Each request emits a structured `conversation_trace` log containing the original query, standalone rewrite, retrieval query, route, and final prompt sent to Bedrock. Repository overviews use consistent Purpose, Architecture, Technologies, Main components, and Request flow sections.
+
+### 5. Grounded answer generation
 
 The selected evidence is sent to Qwen3-Coder-Next through Amazon Bedrock. The prompt requires the model to:
 

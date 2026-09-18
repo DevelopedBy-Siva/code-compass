@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import re
 import time
@@ -19,10 +20,19 @@ from src.vector_store import QdrantVectorStore
 from src.config import Settings
 
 BEDROCK_QWEN_MODEL_ID = os.getenv("BEDROCK_MODEL_ID", "qwen.qwen3-coder-next")
+logger = logging.getLogger("code_compass.conversation")
 
 
 class SessionCancelledError(RuntimeError):
     pass
+
+
+@dataclass
+class ConversationPlan:
+    route: str
+    rewritten_query: str
+    clarification_question: Optional[str] = None
+    rewrite_prompt: Optional[str] = None
 
 
 @dataclass
@@ -610,15 +620,48 @@ class CodebaseRAGSystem:
                 repo = None
             if repo is None:
                 raise ValueError("Repository not found")
-            if repo.status != "indexed":
-                raise ValueError("Repository is not ready for questions yet")
-            if repo_id not in self.repo_chunks:
-                raise ValueError("Session cache expired. Re-index the repository and try again.")
-            repo_chunks = list(self.repo_chunks[repo_id])
+            repo_chunks = (
+                list(self.repo_chunks[repo_id])
+                if repo_id in self.repo_chunks
+                else None
+            )
             self._touch_session(session_key)
 
         normalized_history = self._normalize_history(history or [])
-        question_intent = self._question_intent(question)
+        conversation_plan = self._plan_conversation(question, normalized_history)
+        trace = {
+            "original_query": question,
+            "rewritten_query": conversation_plan.rewritten_query,
+            "retrieval_query": None,
+            "final_prompt": None,
+        }
+        if conversation_plan.rewrite_prompt:
+            trace["rewrite_prompt"] = conversation_plan.rewrite_prompt
+
+        if conversation_plan.route == "casual":
+            answer = self._casual_response(repo, question)
+            self._log_conversation_trace(repo, conversation_plan.route, trace)
+            if debug_retrieval:
+                answer["conversation_trace"] = dict(trace)
+            return answer
+
+        if conversation_plan.route == "clarify":
+            answer = self._clarification_response(
+                repo,
+                conversation_plan.clarification_question,
+            )
+            self._log_conversation_trace(repo, conversation_plan.route, trace)
+            if debug_retrieval:
+                answer["conversation_trace"] = dict(trace)
+            return answer
+
+        if repo.status != "indexed":
+            raise ValueError("Repository is not ready for questions yet")
+        if repo_chunks is None:
+            raise ValueError("Session cache expired. Re-index the repository and try again.")
+
+        rewritten_query = conversation_plan.rewritten_query
+        question_intent = self._question_intent(rewritten_query)
         deep_search_intents = {
             "api",
             "implementation",
@@ -640,7 +683,11 @@ class CodebaseRAGSystem:
         # single file; those copies must not consume the candidate budget.
         fetch_depth = min(max(search_depth * 3, search_depth), 300, len(repo_chunks))
 
-        retrieval_query = self._build_retrieval_query(question, normalized_history)
+        # Conversation references have already been resolved in rewritten_query.
+        # The retrieval query builder remains responsible only for search-oriented
+        # intent expansion; the retrieval pipeline below is otherwise unchanged.
+        retrieval_query = self._build_retrieval_query(rewritten_query, [])
+        trace["retrieval_query"] = retrieval_query
         query_embedding = self.embedder.embed_text(retrieval_query)
 
         semantic_hits = []
@@ -673,7 +720,7 @@ class CodebaseRAGSystem:
 
         path_hits = self._path_intent_search(
             repo_chunks,
-            question,
+            rewritten_query,
             retrieval_query,
             top_k=search_depth,
         )
@@ -681,21 +728,25 @@ class CodebaseRAGSystem:
 
         merged = self._merge_ranked_candidates(fused, path_hits, top_k=search_depth)
 
-        rerank_query = retrieval_query if question_intent in deep_search_intents else question
+        rerank_query = (
+            retrieval_query
+            if question_intent in deep_search_intents
+            else rewritten_query
+        )
 
         rerank_pool = min(len(merged), max(50, top_k * 8))
         reranked = self.hybrid_search.rerank(rerank_query, merged, top_k=rerank_pool)
         rerank_ranks = self._rank_map(reranked)
 
         prioritized = self._prioritize_results(
-            question, retrieval_query, reranked, top_k=rerank_pool
+            rewritten_query, retrieval_query, reranked, top_k=rerank_pool
         )
         prioritized_ranks = self._rank_map(prioritized)
 
         configured_source_limit = int(os.getenv("RAG_FINAL_SOURCE_LIMIT", str(top_k)))
         final_top_k = max(1, min(top_k, configured_source_limit))
         final_sources = self._select_answer_sources(
-            question, prioritized, top_k=final_top_k
+            rewritten_query, prioritized, top_k=final_top_k
         )
         final_ranks = self._rank_map(final_sources)
 
@@ -736,9 +787,18 @@ class CodebaseRAGSystem:
                 )
             )
 
-        answer = self._generate_answer(repo, question, final_sources, normalized_history)
+        answer = self._generate_answer(
+            repo,
+            question,
+            final_sources,
+            normalized_history,
+            rewritten_query=rewritten_query,
+            trace=trace,
+        )
+        self._log_conversation_trace(repo, conversation_plan.route, trace)
         if debug_retrieval:
             answer["retrieval_debug"] = retrieval_debug
+            answer["conversation_trace"] = dict(trace)
         return answer
 
     def end_session(self, session_key: str):
@@ -757,6 +817,8 @@ class CodebaseRAGSystem:
         question: str,
         sources: list,
         history=None,
+        rewritten_query: Optional[str] = None,
+        trace: Optional[dict] = None,
     ) -> dict:
         if not sources:
             return {
@@ -800,8 +862,9 @@ class CodebaseRAGSystem:
                 }
             )
 
-        wants_repo_overview = self._is_repo_overview_question(question)
-        question_intent = self._question_intent(question)
+        standalone_question = rewritten_query or question
+        wants_repo_overview = self._is_repo_overview_question(standalone_question)
+        question_intent = self._question_intent(standalone_question)
 
         system_prompt = """
 You are answering questions as a knowledgeable teammate who has carefully read this repository.
@@ -824,10 +887,11 @@ Rules:
 
         if wants_repo_overview:
             system_prompt += """
-14. For repository overview questions, lead with a direct one or two sentence summary of what the repo does.
-15. Prioritize README and top-level documentation when they are present, then use code to support the explanation.
-16. Mention the main workflow, core stack, and any important product constraints the user would care about.
-17. Keep the answer polished and self-contained, like the overview a real user expects when they ask what a repo is about.
+14. For repository overview questions, always use these five Markdown sections in this exact order: "## Purpose", "## Architecture", "## Technologies", "## Main components", and "## Request flow".
+15. Under Purpose, give a direct one or two sentence summary of what the repository does and the problem it solves.
+16. Under Architecture, explain the high-level structure and major boundaries. Under Technologies, use a concise bullet list of the languages, frameworks, infrastructure, and external services evidenced by the sources.
+17. Under Main components, use bullets naming the important modules or directories and their responsibilities. Under Request flow, give a short numbered or arrow-style sequence from user input to final response; say when a step is not evidenced rather than inventing it.
+18. Prioritize README and top-level documentation when present, then use code to support the explanation. Keep all five sections even when evidence for one is limited.
 """
         elif question_intent in {"api", "implementation", "cross_file", "error_handling", "setup"}:
             system_prompt += """
@@ -848,11 +912,35 @@ Context from the codebase:
 Recent conversation:
 {self._format_history(history or [])}
 
+Standalone interpretation of the question:
+{rewritten_query or question}
+
 Now answer this question using only the context above:
 {question}
 """
 
-        answer_text, finish_reason = self._generate_markdown_response(system_prompt, user_prompt)
+        answer_text, finish_reason = self._generate_markdown_response(
+            system_prompt,
+            user_prompt,
+            trace=trace,
+        )
+
+        if wants_repo_overview and not self._has_structured_overview(answer_text):
+            overview_repair_prompt = """
+Rewrite the answer as a complete repository overview. It must contain all five
+of these Markdown headings, in this order, with grounded content beneath each:
+## Purpose
+## Architecture
+## Technologies
+## Main components
+## Request flow
+Do not add facts that are absent from the repository context.
+"""
+            answer_text, finish_reason = self._generate_markdown_response(
+                system_prompt,
+                f"{user_prompt.strip()}\n\n{overview_repair_prompt.strip()}",
+                trace=trace,
+            )
 
         if self._looks_incomplete(answer_text, finish_reason):
             repair_prompt = f"""
@@ -865,6 +953,7 @@ Draft answer:
             answer_text, finish_reason = self._generate_markdown_response(
                 system_prompt,
                 f"{user_prompt.strip()}\n\n{repair_prompt.strip()}",
+                trace=trace,
             )
             if self._looks_incomplete(answer_text, finish_reason):
                 short_prompt = """
@@ -875,6 +964,7 @@ Do not leave the answer unfinished.
                 answer_text, _ = self._generate_markdown_response(
                     system_prompt,
                     f"{user_prompt.strip()}\n\n{short_prompt.strip()}",
+                    trace=trace,
                 )
 
         answer_text = self._finalize_answer(answer_text)
@@ -906,7 +996,17 @@ Do not leave the answer unfinished.
         self.vector_store.save()
         self.vector_store.close()
 
-    def _generate_markdown_response(self, system_prompt: str, user_prompt: str) -> tuple[str, str]:
+    def _generate_markdown_response(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        trace: Optional[dict] = None,
+    ) -> tuple[str, str]:
+        if trace is not None:
+            trace["final_prompt"] = self._format_bedrock_prompt(
+                system_prompt,
+                user_prompt,
+            )
         response = self.llm_client.converse(
             modelId=self.llm_model,
             system=[{"text": system_prompt.strip()}],
@@ -930,6 +1030,13 @@ Do not leave the answer unfinished.
         if not text.strip():
             raise RuntimeError("Bedrock Qwen returned an empty response.")
         return self._normalize_markdown_answer(text), response.get("stopReason", "")
+
+    @staticmethod
+    def _format_bedrock_prompt(system_prompt: str, user_prompt: str) -> str:
+        return (
+            f"SYSTEM\n{system_prompt.strip()}\n\n"
+            f"USER\n{user_prompt.strip()}"
+        )
 
     @staticmethod
     def _normalize_markdown_answer(raw_text: str) -> str:
@@ -1001,9 +1108,39 @@ Do not leave the answer unfinished.
             return True
         if tokens[-1] in {"a", "an", "the", "to", "for", "with", "of", "in", "on", "from", "about"}:
             return True
-        if len(tokens) >= 20 and cleaned[-1] not in {".", "!", "?", "\"", "'", "`"}:
+        terminal_text = re.sub(r"(?:\s*\[\d+\])+\s*$", "", cleaned).rstrip()
+        if (
+            len(tokens) >= 20
+            and terminal_text
+            and terminal_text[-1] not in {".", "!", "?", "\"", "'", "`"}
+        ):
             return True
         return False
+
+    @staticmethod
+    def _has_structured_overview(answer_text: str) -> bool:
+        expected = (
+            "purpose",
+            "architecture",
+            "technologies",
+            "main components",
+            "request flow",
+        )
+        headings = [
+            match.group(1).strip().lower()
+            for match in re.finditer(
+                r"^#{1,3}\s+(.+?)\s*$",
+                answer_text or "",
+                flags=re.MULTILINE,
+            )
+        ]
+        positions = []
+        for heading in expected:
+            try:
+                positions.append(headings.index(heading))
+            except ValueError:
+                return False
+        return positions == sorted(positions)
 
     @staticmethod
     def _attach_citations(answer_text: str, sources: List[dict]) -> tuple[str, List[dict]]:
@@ -1127,6 +1264,334 @@ Do not leave the answer unfinished.
     @staticmethod
     def _mark_repo_updated(repo: Repository):
         repo.updated_at = datetime.utcnow()
+
+    def _plan_conversation(
+        self,
+        question: str,
+        history: List[dict],
+    ) -> ConversationPlan:
+        normalized = " ".join((question or "").strip().split())
+        if self._is_casual_conversation(normalized):
+            return ConversationPlan(route="casual", rewritten_query=normalized)
+
+        if not self._needs_conversation_context(normalized):
+            return ConversationPlan(route="retrieve", rewritten_query=normalized)
+
+        usable_history = [
+            turn
+            for turn in history[-6:]
+            if turn.get("content", "").strip()
+            and not self._is_casual_conversation(turn.get("content", ""))
+            and (
+                turn.get("role") != "assistant"
+                or self._is_substantive_assistant_message(turn.get("content", ""))
+            )
+        ]
+        if not usable_history:
+            return ConversationPlan(
+                route="clarify",
+                rewritten_query=normalized,
+                clarification_question=self._targeted_clarification(normalized),
+            )
+
+        rewrite_system_prompt = """
+You resolve follow-up questions about a software repository into standalone search queries.
+
+Return exactly one JSON object with these fields:
+- rewritten_query: a concise, standalone repository question with pronouns and references resolved
+- needs_clarification: true only when the history does not establish a single reasonable referent
+- clarification_question: one targeted question naming what the user must identify, or an empty string
+
+Use only the conversation supplied. Preserve file paths, symbol names, and technical terms exactly. Do not answer the question and do not add facts. If more than one referent is genuinely plausible, request clarification instead of guessing.
+"""
+        rewrite_user_prompt = f"""
+Recent conversation:
+{self._format_history(usable_history)}
+
+Follow-up question:
+{normalized}
+"""
+        rewrite_prompt = self._format_bedrock_prompt(
+            rewrite_system_prompt,
+            rewrite_user_prompt,
+        )
+
+        try:
+            response = self.llm_client.converse(
+                modelId=self.llm_model,
+                system=[{"text": rewrite_system_prompt.strip()}],
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [{"text": rewrite_user_prompt.strip()}],
+                    }
+                ],
+                inferenceConfig={"temperature": 0.0, "maxTokens": 350},
+            )
+            content_blocks = (
+                response.get("output", {})
+                .get("message", {})
+                .get("content", [])
+            )
+            raw_text = "".join(block.get("text", "") for block in content_blocks)
+            payload = self._parse_rewrite_response(raw_text)
+            needs_clarification = payload.get("needs_clarification") is True or str(
+                payload.get("needs_clarification", "")
+            ).lower() == "true"
+            if needs_clarification:
+                clarification = str(payload.get("clarification_question") or "").strip()
+                generic_clarification = " ".join(clarification.lower().split())
+                if len(clarification.split()) < 6 or any(
+                    phrase in generic_clarification
+                    for phrase in {
+                        "could you clarify",
+                        "please clarify",
+                        "what you mean",
+                        "which one",
+                    }
+                ):
+                    clarification = self._targeted_clarification(normalized)
+                return ConversationPlan(
+                    route="clarify",
+                    rewritten_query=normalized,
+                    clarification_question=(
+                        clarification or self._targeted_clarification(normalized)
+                    ),
+                    rewrite_prompt=rewrite_prompt,
+                )
+
+            rewritten = " ".join(
+                str(payload.get("rewritten_query") or "").strip().split()
+            )
+            if rewritten:
+                return ConversationPlan(
+                    route="retrieve",
+                    rewritten_query=rewritten,
+                    rewrite_prompt=rewrite_prompt,
+                )
+        except Exception as exc:
+            logger.warning(
+                "query_rewrite_failed error_type=%s",
+                type(exc).__name__,
+            )
+
+        return ConversationPlan(
+            route="retrieve",
+            rewritten_query=self._fallback_conversation_rewrite(
+                normalized,
+                usable_history,
+            ),
+            rewrite_prompt=rewrite_prompt,
+        )
+
+    @staticmethod
+    def _parse_rewrite_response(raw_text: str) -> dict:
+        cleaned = re.sub(
+            r"^```(?:json)?\s*|\s*```$",
+            "",
+            (raw_text or "").strip(),
+            flags=re.IGNORECASE,
+        )
+        match = re.search(r"\{.*\}", cleaned, flags=re.DOTALL)
+        if not match:
+            raise ValueError("Query rewrite did not return JSON")
+        payload = json.loads(match.group(0))
+        if not isinstance(payload, dict):
+            raise ValueError("Query rewrite JSON must be an object")
+        return payload
+
+    @staticmethod
+    def _fallback_conversation_rewrite(question: str, history: List[dict]) -> str:
+        recent_user = next(
+            (
+                turn.get("content", "").strip()
+                for turn in reversed(history)
+                if turn.get("role") == "user" and turn.get("content", "").strip()
+            ),
+            "",
+        )
+        recent_assistant = next(
+            (
+                turn.get("content", "").strip()
+                for turn in reversed(history)
+                if turn.get("role") == "assistant"
+                and CodebaseRAGSystem._is_substantive_assistant_message(
+                    turn.get("content", "")
+                )
+            ),
+            "",
+        )
+        parts = [f"Follow-up question: {question}"]
+        if recent_user:
+            parts.append(f"Referenced conversation topic: {recent_user[:500]}")
+        if recent_assistant:
+            parts.append(f"Prior answer context: {recent_assistant[:500]}")
+        return "\n".join(parts)
+
+    @staticmethod
+    def _needs_conversation_context(question: str) -> bool:
+        normalized = " ".join((question or "").lower().split())
+        normalized = re.sub(
+            r"\b(?:this|that)\s+(?:repo|repository|project|codebase)\b",
+            "repository",
+            normalized,
+        )
+        if re.search(
+            r"\b(?:here|there|above|earlier|previous|former|latter|same)\b",
+            normalized,
+        ):
+            return True
+        if re.search(r"\bits\b", normalized):
+            return True
+        if re.search(
+            r"^(?:this|that|it|these|those|they|them)\b",
+            normalized,
+        ):
+            return True
+        if re.search(
+            r"^(?:how|why|where|when|what|does|do|is|are|was|were|can|"
+            r"could|would|should)\s+(?:does\s+|do\s+|is\s+|are\s+|was\s+|"
+            r"were\s+|can\s+|could\s+|would\s+|should\s+)?"
+            r"(?:this|that|it|these|those|they|them)\b",
+            normalized,
+        ) and not re.match(r"^(?:is|would|could|can) it possible\b", normalized):
+            return True
+        if re.search(
+            r"^(?:explain|show|trace|describe|summarize|find)\s+"
+            r"(?:this|that|it|these|those|them)\b",
+            normalized,
+        ):
+            return True
+        if re.search(
+            r"\b(?:this|that|these|those)\s+(?:one|code|function|method|"
+            r"class|component|flow|behavior|file|module|implementation|endpoint)\b",
+            normalized,
+        ):
+            return True
+        if re.search(
+            r"\b(?:about|of|for|with)\s+(?:this|that|it|these|those|them)\s*\??$",
+            normalized,
+        ):
+            return True
+        if re.fullmatch(
+            r"(?:what|where|why|how|which|when)(?: exactly| so)?\??",
+            normalized,
+        ):
+            return True
+        if re.fullmatch(
+            r"(?:show me|tell me more|can you elaborate|"
+            r"give me (?:the )?(?:code|implementation|tests?|example))\??",
+            normalized,
+        ):
+            return True
+        return bool(
+            re.match(
+                r"^(?:and\s+)?(?:what|how) about\b|^(?:and|also)\b",
+                normalized,
+            )
+        )
+
+    @staticmethod
+    def _is_casual_conversation(question: str) -> bool:
+        normalized = re.sub(
+            r"[^a-z0-9'\s]",
+            "",
+            " ".join((question or "").lower().split()),
+        ).strip()
+        casual_patterns = (
+            r"(?:hi|hello|hey|hiya|yo)(?: there)?",
+            r"good (?:morning|afternoon|evening)",
+            r"how are you(?: doing)?",
+            r"(?:thanks|thank you|thx)(?: very much| so much)?",
+            r"(?:ok|okay|got it|sounds good|cool|nice)",
+            r"(?:bye|goodbye|see you|talk to you later)",
+            r"(?:who are you|what can you do|help|can you help(?: me)?)",
+            r"(?:what'?s up|how'?s it going|nice to meet you|tell me a joke)",
+        )
+        return any(re.fullmatch(pattern, normalized) for pattern in casual_patterns)
+
+    @staticmethod
+    def _targeted_clarification(question: str) -> str:
+        normalized = " ".join((question or "").lower().split())
+        if re.search(r"\bhere\b", normalized):
+            return "Which file, code section, or earlier point does “here” refer to?"
+        if re.search(r"\b(?:this|that|it|its)\b", normalized):
+            reference = re.search(r"\b(this|that|it|its)\b", normalized).group(1)
+            return (
+                f"What specific component, file, or behavior does “{reference}” "
+                "refer to?"
+            )
+        if re.search(r"\b(?:these|those|they|them)\b", normalized):
+            return "Which components or behaviors are you referring to?"
+        return "Which earlier component or behavior should I use for this follow-up?"
+
+    def _casual_response(self, repo: Repository, question: str) -> dict:
+        normalized = " ".join((question or "").lower().split())
+        if re.search(r"\b(?:thanks|thank you|thx)\b", normalized):
+            answer = "You’re welcome! Ask another question whenever you’re ready."
+        elif "how are you" in normalized:
+            answer = (
+                "Doing well—and ready to help you explore "
+                f"`{repo.owner}/{repo.name}`."
+            )
+        elif re.search(r"\b(?:bye|goodbye|see you)\b", normalized):
+            answer = "See you! I’ll be here when you want to explore more of the repository."
+        elif "who are you" in normalized or "what can you do" in normalized or normalized == "help":
+            answer = (
+                "I’m Code Compass. I can explain this repository’s architecture, "
+                "trace behavior across files, find implementations, and cite the relevant code."
+            )
+        else:
+            answer = (
+                f"Hi! Ask me anything about `{repo.owner}/{repo.name}`—for example, "
+                "its architecture, a request flow, or where a feature is implemented."
+            )
+        return {
+            "answer": answer,
+            "confidence": "high",
+            "summary": " ".join(answer.split())[:160],
+            "citations": [],
+            "sources": [],
+            "repo": self._serialize_repo(repo),
+            "response_type": "casual",
+        }
+
+    def _clarification_response(
+        self,
+        repo: Repository,
+        clarification_question: Optional[str],
+    ) -> dict:
+        answer = clarification_question or (
+            "Which component, file, or behavior should I focus on?"
+        )
+        return {
+            "answer": answer,
+            "confidence": "low",
+            "summary": answer,
+            "citations": [],
+            "sources": [],
+            "repo": self._serialize_repo(repo),
+            "response_type": "clarification",
+        }
+
+    @staticmethod
+    def _log_conversation_trace(
+        repo: Repository,
+        route: str,
+        trace: dict,
+    ) -> None:
+        logger.info(
+            "conversation_trace=%s",
+            json.dumps(
+                {
+                    "repo_id": repo.id,
+                    "repository": f"{repo.owner}/{repo.name}",
+                    "route": route,
+                    **trace,
+                },
+                ensure_ascii=False,
+            ),
+        )
 
     def _build_retrieval_query(self, question: str, history: List[dict]) -> str:
         normalized = " ".join(question.strip().split())
@@ -1960,6 +2425,19 @@ Do not leave the answer unfinished.
             "ask a question",
         }:
             return False
+        if any(
+            phrase in normalized
+            for phrase in {
+                "ask me anything about",
+                "ask another question whenever",
+                "i’m code compass",
+                "i'm code compass",
+                "ready to help you explore",
+                "i’ll be here when you want to explore",
+                "i'll be here when you want to explore",
+            }
+        ):
+            return False
         return True
 
     @staticmethod
@@ -1989,7 +2467,7 @@ Do not leave the answer unfinished.
         if not history:
             return "None"
         lines = []
-        for turn in history[-4:]:
+        for turn in history[-6:]:
             role = turn.get("role", "user").capitalize()
             content = " ".join(turn.get("content", "").split())
             if content:

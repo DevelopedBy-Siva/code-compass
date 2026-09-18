@@ -42,7 +42,7 @@ class MessageTurn(BaseModel):
 
 class QueryRequest(BaseModel):
     repo_id: int = Field(..., ge=1)
-    question: str = Field(..., min_length=3)
+    question: str = Field(..., min_length=1, max_length=4000)
     top_k: int = Field(8, ge=3, le=12)
     history: List[MessageTurn] = Field(default_factory=list, max_length=8)
 

@@ -23,8 +23,10 @@ Vercel adapter, configuration reference, and engineering review.
 - Generate embeddings and persist reusable repository indexes in Qdrant
 - Maintain lightweight repository and session metadata in memory
 - Run indexing as a background task
+- Route casual chat, rewrite contextual follow-ups, and request targeted clarification when needed
 - Retrieve evidence with semantic search, lexical search, fusion, and reranking
 - Generate answers from the selected context and return citations to the UI
+- Log the original, rewritten, and retrieval queries plus the final Bedrock prompt
 - Delete cloned repository files after indexing while retaining the Qdrant cache
 
 ## Runtime Configuration
