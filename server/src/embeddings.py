@@ -1,4 +1,6 @@
+import json
 import os
+import statistics
 import time
 from typing import Callable, List, Optional
 
@@ -21,6 +23,12 @@ class EmbeddingGenerator:
         )
         self.batch_size = max(1, int(os.getenv("QWEN_EMBEDDING_BATCH_SIZE", "8")))
         self.device = self._select_device()
+        cuda_available = torch.cuda.is_available()
+        if self._requires_cuda() and self.device != "cuda":
+            raise RuntimeError(
+                "CUDA is required for embeddings, but torch.cuda.is_available() is false. "
+                "Check the container CUDA runtime and SageMaker host driver compatibility."
+            )
 
         print(
             f"[embeddings] Loading {self.model_name} on device={self.device}",
@@ -42,10 +50,20 @@ class EmbeddingGenerator:
         self.model.config.pad_token_id = self.tokenizer.pad_token_id
         self.model.eval()
         self.embedding_dim = int(self.model.config.hidden_size)
+        self.model_device = str(next(self.model.parameters()).device)
         elapsed = time.perf_counter() - started_at
         print(
             f"[embeddings] Model ready dim={self.embedding_dim} load_time={elapsed:.2f}s",
             flush=True,
+        )
+        self._log_profile(
+            "embedding_device",
+            cuda_available=cuda_available,
+            device=self.device,
+            gpu_name=(torch.cuda.get_device_name(0) if cuda_available else None),
+            model_device=self.model_device,
+            batch_size=self.batch_size,
+            model_name=self.model_name,
         )
 
     def embed_text(self, text: str) -> np.ndarray:
@@ -63,6 +81,7 @@ class EmbeddingGenerator:
 
         effective_batch_size = max(1, batch_size or self.batch_size)
         all_embeddings = []
+        batch_profiles = []
         total = len(texts)
 
         for start in range(0, total, effective_batch_size):
@@ -74,33 +93,87 @@ class EmbeddingGenerator:
                 f"items={len(batch)} progress={start}/{total}",
                 flush=True,
             )
-            started_at = time.perf_counter()
-            batch_embeddings = self._encode(batch)
+            batch_embeddings, profile = self._encode_with_profile(batch)
             all_embeddings.append(batch_embeddings)
-            elapsed = time.perf_counter() - started_at
+            elapsed = profile["total_seconds"]
             completed = min(start + len(batch), total)
             print(
                 f"[embeddings] Finished batch {batch_number}/{total_batches} "
                 f"elapsed={elapsed:.2f}s progress={completed}/{total}",
                 flush=True,
             )
+            batch_profile = {
+                "batch": batch_number,
+                "total_batches": total_batches,
+                "size": len(batch),
+                **profile,
+            }
+            batch_profiles.append(batch_profile)
+            self._log_profile("embedding_batch", **batch_profile)
             if progress_callback:
                 progress_callback(completed, total)
 
+        total_seconds = sum(item["total_seconds"] for item in batch_profiles)
+        throughputs = [item["chunks_per_second"] for item in batch_profiles]
+        latencies = [item["total_seconds"] for item in batch_profiles]
+        worst_index = max(range(len(latencies)), key=latencies.__getitem__)
+        best_index = min(range(len(latencies)), key=latencies.__getitem__)
+        self.last_profile = {
+            "device": self.device,
+            "cuda_available": torch.cuda.is_available(),
+            "gpu_name": (
+                torch.cuda.get_device_name(0) if torch.cuda.is_available() else None
+            ),
+            "model_device": self.model_device,
+            "batch_size": effective_batch_size,
+            "batches": len(batch_profiles),
+            "chunks": total,
+            "total_seconds": total_seconds,
+            "average_batch_seconds": statistics.mean(latencies),
+            "average_chunks_per_second": total / total_seconds if total_seconds else 0.0,
+            "median_chunks_per_second": statistics.median(throughputs),
+            "worst_batch": batch_profiles[worst_index],
+            "best_batch": batch_profiles[best_index],
+            "gpu_memory_allocated_bytes": max(
+                item["gpu_memory_allocated_bytes"] for item in batch_profiles
+            ),
+            "gpu_memory_peak_bytes": max(
+                item["gpu_memory_peak_bytes"] for item in batch_profiles
+            ),
+            "gpu_utilization_percent": self._last_non_null(
+                item["gpu_utilization_percent"] for item in batch_profiles
+            ),
+        }
+        self._log_profile("embedding_summary", **self.last_profile)
         return np.vstack(all_embeddings).astype("float32")
 
     def get_embedding_dim(self) -> int:
         return self.embedding_dim
 
     def _encode(self, texts: List[str]) -> np.ndarray:
+        embeddings, _ = self._encode_with_profile(texts)
+        return embeddings
+
+    def _encode_with_profile(self, texts: List[str]) -> tuple[np.ndarray, dict]:
+        total_started_at = time.perf_counter()
+        tokenize_started_at = time.perf_counter()
         inputs = self.tokenizer(
             texts,
             padding=True,
             truncation=True,
             max_length=8192,
             return_tensors="pt",
-        ).to(self.device)
+        )
+        tokenize_seconds = time.perf_counter() - tokenize_started_at
 
+        transfer_started_at = time.perf_counter()
+        inputs = inputs.to(self.device)
+        if self.device == "cuda":
+            torch.cuda.synchronize()
+            torch.cuda.reset_peak_memory_stats()
+        transfer_seconds = time.perf_counter() - transfer_started_at
+
+        inference_started_at = time.perf_counter()
         with torch.inference_mode():
             outputs = self.model(**inputs)
             embeddings = self._last_token_pool(
@@ -108,9 +181,24 @@ class EmbeddingGenerator:
                 inputs["attention_mask"],
             ).float()
             embeddings = F.normalize(embeddings, p=2, dim=1)
+        if self.device == "cuda":
+            torch.cuda.synchronize()
+        inference_seconds = time.perf_counter() - inference_started_at
 
+        postprocess_started_at = time.perf_counter()
         embeddings = embeddings.detach().cpu().float().numpy()
-        return self._sanitize_embeddings(embeddings)
+        embeddings = self._sanitize_embeddings(embeddings)
+        postprocess_seconds = time.perf_counter() - postprocess_started_at
+        total_seconds = time.perf_counter() - total_started_at
+        return embeddings, {
+            "tokenize_seconds": tokenize_seconds,
+            "transfer_seconds": transfer_seconds,
+            "inference_seconds": inference_seconds,
+            "postprocess_seconds": postprocess_seconds,
+            "total_seconds": total_seconds,
+            "chunks_per_second": len(texts) / total_seconds if total_seconds else 0.0,
+            **self._gpu_stats(),
+        }
 
     @staticmethod
     def _last_token_pool(
@@ -156,3 +244,43 @@ class EmbeddingGenerator:
         if torch.backends.mps.is_available():
             return "mps"
         return "cpu"
+
+    @staticmethod
+    def _requires_cuda() -> bool:
+        return os.getenv("REQUIRE_CUDA", "0").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+        }
+
+    def _gpu_stats(self) -> dict:
+        if self.device != "cuda":
+            return {
+                "gpu_memory_allocated_bytes": 0,
+                "gpu_memory_peak_bytes": 0,
+                "gpu_utilization_percent": None,
+            }
+        try:
+            utilization = torch.cuda.utilization()
+        except (AttributeError, ImportError, RuntimeError, OSError):
+            utilization = None
+        return {
+            "gpu_memory_allocated_bytes": int(torch.cuda.memory_allocated()),
+            "gpu_memory_peak_bytes": int(torch.cuda.max_memory_allocated()),
+            "gpu_utilization_percent": utilization,
+        }
+
+    @staticmethod
+    def _last_non_null(values):
+        result = None
+        for value in values:
+            if value is not None:
+                result = value
+        return result
+
+    @staticmethod
+    def _log_profile(event: str, **fields) -> None:
+        print(
+            "[profile] " + json.dumps({"event": event, **fields}, sort_keys=True),
+            flush=True,
+        )

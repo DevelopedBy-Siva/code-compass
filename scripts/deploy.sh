@@ -25,6 +25,7 @@ startup_timeout="${SAGEMAKER_STARTUP_TIMEOUT_SECONDS:-900}"
 container_env="$({
   jq -n \
     --arg app_env "${APP_ENV:-production}" \
+    --arg require_cuda "${REQUIRE_CUDA:-1}" \
     --arg aws_region "$AWS_REGION" \
     --arg bedrock_model "${BEDROCK_MODEL_ID:-qwen.qwen3-coder-next}" \
     --arg cors "${CORS_ORIGINS:-http://localhost:3000}" \
@@ -34,7 +35,7 @@ container_env="$({
     --arg secret_arn "${QDRANT_API_KEY_SECRET_ARN:-}" \
     --arg api_key "${QDRANT_API_KEY:-}" \
     --arg session_ttl "${SESSION_TTL_MINUTES:-120}" \
-    '{APP_ENV:$app_env,AWS_REGION:$aws_region,BEDROCK_MODEL_ID:$bedrock_model,CORS_ORIGINS:$cors,QDRANT_URL:$qdrant_url,QDRANT_COLLECTION:$qdrant_collection,REPO_CACHE_DIR:$repo_cache_dir,SESSION_TTL_MINUTES:$session_ttl}
+    '{APP_ENV:$app_env,REQUIRE_CUDA:$require_cuda,AWS_REGION:$aws_region,BEDROCK_MODEL_ID:$bedrock_model,CORS_ORIGINS:$cors,QDRANT_URL:$qdrant_url,QDRANT_COLLECTION:$qdrant_collection,REPO_CACHE_DIR:$repo_cache_dir,SESSION_TTL_MINUTES:$session_ttl}
      + (if $secret_arn != "" then {QDRANT_API_KEY_SECRET_ARN:$secret_arn} else {} end)
      + (if $api_key != "" then {QDRANT_API_KEY:$api_key} else {} end)'
 })"

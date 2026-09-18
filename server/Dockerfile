@@ -2,7 +2,7 @@
 # The GPU runtime already contains the matching CUDA, cuDNN, and PyTorch
 # libraries. A multi-stage Python build would duplicate several GB of GPU
 # wheels without making the final image smaller.
-FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+FROM pytorch/pytorch:2.5.1-cuda11.8-cudnn9-runtime
 
 ARG PRELOAD_MODELS=1
 ARG EMBEDDING_MODEL_ID=Qwen/Qwen3-Embedding-0.6B

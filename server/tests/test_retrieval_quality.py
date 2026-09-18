@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 import torch
@@ -42,6 +43,12 @@ class RetrievalModelTests(unittest.TestCase):
         pooled = EmbeddingGenerator._last_token_pool(states, mask)
         self.assertTrue(torch.equal(pooled, torch.tensor([[2.0, 0.0], [3.0, 0.0]])))
         self.assertIn("codebase question", RETRIEVAL_INSTRUCTION)
+
+    def test_embedding_cuda_requirement_is_environment_driven(self):
+        with patch.dict("os.environ", {"REQUIRE_CUDA": "1"}):
+            self.assertTrue(EmbeddingGenerator._requires_cuda())
+        with patch.dict("os.environ", {"REQUIRE_CUDA": "0"}):
+            self.assertFalse(EmbeddingGenerator._requires_cuda())
 
     def test_reranker_scores_yes_probability_and_varies_by_document(self):
         engine = HybridSearchEngine.__new__(HybridSearchEngine)
@@ -115,11 +122,15 @@ class RetrievalPipelineTests(unittest.TestCase):
                 '# café introduces multibyte text\n\nclass QuerySet:\n    def filter(self):\n        return self\n',
                 encoding="utf-8",
             )
-            chunks = CodeParser().chunk_file(str(path), directory)
+            profile = {}
+            chunks = CodeParser().chunk_file(str(path), directory, profile=profile)
 
         names = {chunk["symbol_name"] for chunk in chunks}
         self.assertIn("QuerySet", names)
         self.assertIn("QuerySet.filter", names)
+        self.assertGreaterEqual(profile["parse_seconds"], 0.0)
+        self.assertGreaterEqual(profile["chunk_seconds"], 0.0)
+        self.assertEqual(profile["chunk_count"], len(chunks))
 
 
 class QdrantVectorStoreTests(unittest.TestCase):
@@ -176,6 +187,9 @@ class QdrantVectorStoreTests(unittest.TestCase):
         )
 
         self.assertEqual(len(ids), 3)
+        self.assertEqual(store.last_upsert_profile["upsert_calls"], 3)
+        self.assertEqual(store.last_upsert_profile["points_per_request"], [1, 1, 1])
+        self.assertEqual(store.last_upsert_profile["insertion_mode"], "individual")
         self.assertEqual(store.get_stats()["total_vectors"], 3)
         self.assertEqual(store.get_repository_chunks("github:owner/repo@main"), [])
 

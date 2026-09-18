@@ -1,4 +1,7 @@
+import json
 import os
+import statistics
+import time
 from typing import List, Optional, Tuple
 from uuid import uuid4
 
@@ -150,6 +153,8 @@ class QdrantVectorStore:
         self._require_collection()
         ids = [str(uuid4()) for _ in metadata]
         total_points = len(ids)
+        request_profiles = []
+        upload_started_at = time.perf_counter()
 
         for start in range(0, total_points, self.upsert_batch_size):
             end = start + self.upsert_batch_size
@@ -182,13 +187,50 @@ class QdrantVectorStore:
                 f"points={len(points)} progress={start}/{total_points}",
                 flush=True,
             )
+            request_started_at = time.perf_counter()
             self.client.upsert(
                 collection_name=self.collection_name,
                 points=points,
                 wait=True,
             )
+            request_seconds = time.perf_counter() - request_started_at
+            request_profile = {
+                "request": batch_number,
+                "total_requests": total_batches,
+                "points": len(points),
+                "seconds": request_seconds,
+                "points_per_second": (
+                    len(points) / request_seconds if request_seconds else 0.0
+                ),
+            }
+            request_profiles.append(request_profile)
+            self._log_profile("qdrant_upsert", **request_profile)
+
+        total_upload_seconds = time.perf_counter() - upload_started_at
+        latencies = [item["seconds"] for item in request_profiles]
+        points_per_request = [item["points"] for item in request_profiles]
+        self.last_upsert_profile = {
+            "upsert_calls": len(request_profiles),
+            "total_points": total_points,
+            "configured_batch_size": self.upsert_batch_size,
+            "points_per_request": points_per_request,
+            "average_points_per_request": statistics.mean(points_per_request),
+            "average_request_seconds": statistics.mean(latencies),
+            "total_upload_seconds": total_upload_seconds,
+            "insertion_mode": (
+                "individual" if max(points_per_request) == 1 else "batched"
+            ),
+        }
+        self._log_profile("qdrant_summary", **self.last_upsert_profile)
 
         return ids
+
+    @staticmethod
+    def _log_profile(event: str, **fields) -> None:
+        print(
+            "[profile] " + json.dumps({"event": event, **fields}, sort_keys=True),
+            flush=True,
+        )
 
     def get_repository_chunks(
         self,

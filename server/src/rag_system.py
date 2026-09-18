@@ -1,5 +1,7 @@
+import json
 import os
 import re
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from threading import Lock, RLock
@@ -195,6 +197,16 @@ class CodebaseRAGSystem:
         clone_info = None
         staged_generation = None
         generation_activated = False
+        index_started_at = time.perf_counter()
+        timings = {}
+        filtering_profile = {}
+        parsing_profile = {
+            "files_parsed": 0,
+            "files_without_chunks": 0,
+            "file_read_seconds": 0.0,
+            "tree_sitter_seconds": 0.0,
+            "chunk_generation_seconds": 0.0,
+        }
         try:
             with self.repo_lock:
                 self._cleanup_expired_sessions()
@@ -213,7 +225,9 @@ class CodebaseRAGSystem:
 
             self._set_progress(repo.id, phase="cloning", message="Cloning repository")
 
+            stage_started_at = time.perf_counter()
             clone_info = self.repo_fetcher.clone_repository(repo.source_url or repo.github_url)
+            timings["repository_clone_seconds"] = time.perf_counter() - stage_started_at
             self._ensure_repo_not_cancelled(repo.id)
             with self.repo_lock:
                 self._ensure_repo_still_exists(repo.id)
@@ -226,7 +240,16 @@ class CodebaseRAGSystem:
                 flush=True,
             )
 
-            source_files = list(self.repo_fetcher.iter_source_files(clone_info["local_path"]))
+            stage_started_at = time.perf_counter()
+            source_files = list(
+                self.repo_fetcher.iter_source_files(
+                    clone_info["local_path"],
+                    profile=filtering_profile,
+                )
+            )
+            timings["repository_filtering_seconds"] = (
+                time.perf_counter() - stage_started_at
+            )
             total_files = len(source_files)
             print(
                 f"[indexing] Found {total_files} source files for repo_id={repo.id}",
@@ -244,8 +267,24 @@ class CodebaseRAGSystem:
             chunk_payloads = []
             file_count = 0
             for index, file_path in enumerate(source_files, start=1):
-                file_chunks = self.parser.chunk_file(str(file_path), clone_info["local_path"])
+                file_profile = {}
+                file_chunks = self.parser.chunk_file(
+                    str(file_path),
+                    clone_info["local_path"],
+                    profile=file_profile,
+                )
+                parsing_profile["files_parsed"] += 1
+                parsing_profile["file_read_seconds"] += file_profile.get(
+                    "read_seconds", 0.0
+                )
+                parsing_profile["tree_sitter_seconds"] += file_profile.get(
+                    "parse_seconds", 0.0
+                )
+                parsing_profile["chunk_generation_seconds"] += file_profile.get(
+                    "chunk_seconds", 0.0
+                )
                 if not file_chunks:
+                    parsing_profile["files_without_chunks"] += 1
                     self._set_progress(
                         repo.id,
                         phase="parsing",
@@ -284,6 +323,7 @@ class CodebaseRAGSystem:
                 total_chunks=len(chunk_payloads),
                 embedded_chunks=0,
             )
+            stage_started_at = time.perf_counter()
             embeddings = self.embedder.embed_batch(
                 searchable_texts,
                 progress_callback=lambda completed, total: self._set_progress(
@@ -297,8 +337,10 @@ class CodebaseRAGSystem:
                     embedded_chunks=completed,
                 ),
             )
+            timings["embedding_seconds"] = time.perf_counter() - stage_started_at
             self._ensure_repo_not_cancelled(repo.id)
 
+            stage_started_at = time.perf_counter()
             indexed_at = datetime.utcnow()
 
             vector_metadata = []
@@ -324,8 +366,13 @@ class CodebaseRAGSystem:
                         "searchable_text": chunk["searchable_text"],
                     }
                 )
+            timings["metadata_preparation_seconds"] = (
+                time.perf_counter() - stage_started_at
+            )
 
+            stage_started_at = time.perf_counter()
             embedding_ids = self.vector_store.add_embeddings(embeddings, vector_metadata)
+            timings["qdrant_upserts_seconds"] = time.perf_counter() - stage_started_at
             print(
                 f"[indexing] Uploaded {len(embedding_ids)} embeddings to vector store for repo_id={repo.id}",
                 flush=True,
@@ -339,6 +386,7 @@ class CodebaseRAGSystem:
                 discovered_chunks=len(chunk_payloads),
             )
 
+            stage_started_at = time.perf_counter()
             created_rows = []
             for chunk, embedding_id in zip(chunk_payloads, embedding_ids):
                 row = {
@@ -378,9 +426,28 @@ class CodebaseRAGSystem:
             for item in matching_repositories:
                 self.hybrid_search.build_for_repository(item.id, serialized)
             self.vector_store.save()
+            timings["metadata_persistence_seconds"] = (
+                time.perf_counter() - stage_started_at
+            )
             with self.repo_lock:
                 self.cancelled_repo_ids.discard(repo.id)
+            stage_started_at = time.perf_counter()
             self.repo_fetcher.cleanup_repository(clone_info["local_path"])
+            timings["repository_cleanup_seconds"] = time.perf_counter() - stage_started_at
+            timings["tree_sitter_parsing_seconds"] = parsing_profile[
+                "tree_sitter_seconds"
+            ]
+            timings["chunk_generation_seconds"] = parsing_profile[
+                "chunk_generation_seconds"
+            ]
+            timings["total_indexing_seconds"] = time.perf_counter() - index_started_at
+            self._log_index_profile(
+                repo.id,
+                timings,
+                filtering_profile,
+                parsing_profile,
+                len(chunk_payloads),
+            )
             print(f"[indexing] Repository index complete repo_id={repo.id}", flush=True)
         except Exception as exc:
             print(f"[indexing] Repository index failed repo_id={repo_id} error={exc}", flush=True)
@@ -434,6 +501,37 @@ class CodebaseRAGSystem:
                 )
                 return
             raise
+
+    @staticmethod
+    def _log_index_profile(
+        repo_id: int,
+        timings: dict,
+        filtering_profile: dict,
+        parsing_profile: dict,
+        chunk_count: int,
+    ) -> None:
+        payload = {
+            "event": "indexing_summary",
+            "repo_id": repo_id,
+            "chunks": chunk_count,
+            "timings": timings,
+            "filtering": filtering_profile,
+            "parsing": parsing_profile,
+        }
+        print("[profile] " + json.dumps(payload, sort_keys=True), flush=True)
+        labels = (
+            ("Clone", "repository_clone_seconds"),
+            ("Filtering", "repository_filtering_seconds"),
+            ("Parsing", "tree_sitter_parsing_seconds"),
+            ("Chunking", "chunk_generation_seconds"),
+            ("Embedding", "embedding_seconds"),
+            ("Qdrant", "qdrant_upserts_seconds"),
+            ("Metadata", "metadata_persistence_seconds"),
+            ("Total", "total_indexing_seconds"),
+        )
+        print(f"[indexing] Timing summary repo_id={repo_id}", flush=True)
+        for label, key in labels:
+            print(f"{label + ':':<18}{timings.get(key, 0.0):>10.2f}s", flush=True)
 
     def restore_repository_from_cache(
         self,

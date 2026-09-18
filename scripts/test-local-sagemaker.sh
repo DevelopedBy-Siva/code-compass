@@ -57,6 +57,7 @@ cleanup
 
 env_args=(
   -e APP_ENV="${APP_ENV:-production}"
+  -e REQUIRE_CUDA="${REQUIRE_CUDA:-0}"
   -e AWS_REGION="$AWS_REGION"
   -e BEDROCK_MODEL_ID="${BEDROCK_MODEL_ID:-qwen.qwen3-coder-next}"
   -e CORS_ORIGINS="$CORS_ORIGINS"

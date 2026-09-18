@@ -3,6 +3,7 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
+from typing import Optional
 from urllib.parse import urlparse
 
 
@@ -187,22 +188,43 @@ class RepoFetcher:
         if target.exists():
             shutil.rmtree(target)
 
-    def iter_source_files(self, repo_path: str):
+    def iter_source_files(self, repo_path: str, profile: Optional[dict] = None):
         root = Path(repo_path)
+        counts = {
+            "files_scanned": 0,
+            "files_included": 0,
+            "files_skipped": 0,
+            "skipped_ignored_directory": 0,
+            "skipped_ignored_filename": 0,
+            "skipped_unsupported_type": 0,
+            "skipped_oversized": 0,
+        }
         for file_path in root.rglob("*"):
             if not file_path.is_file():
                 continue
+            counts["files_scanned"] += 1
             relative_parts = file_path.relative_to(root).parts
             if any(part in IGNORED_DIRS for part in relative_parts):
+                counts["files_skipped"] += 1
+                counts["skipped_ignored_directory"] += 1
                 continue
             if file_path.name in IGNORED_FILENAMES:
+                counts["files_skipped"] += 1
+                counts["skipped_ignored_filename"] += 1
                 continue
             if (
                 file_path.suffix.lower() not in SUPPORTED_EXTENSIONS
                 and file_path.suffix.lower() not in SUPPORTED_TEMPLATE_SUFFIXES
                 and file_path.name not in SUPPORTED_FILENAMES
             ):
+                counts["files_skipped"] += 1
+                counts["skipped_unsupported_type"] += 1
                 continue
             if file_path.stat().st_size > MAX_FILE_SIZE_BYTES:
+                counts["files_skipped"] += 1
+                counts["skipped_oversized"] += 1
                 continue
+            counts["files_included"] += 1
             yield file_path
+        if profile is not None:
+            profile.update(counts)

@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 
 SERVER_ROOT = Path(__file__).resolve().parents[1]
+REPOSITORY_ROOT = SERVER_ROOT.parent
 if str(SERVER_ROOT) not in sys.path:
     sys.path.insert(0, str(SERVER_ROOT))
 
@@ -17,6 +18,20 @@ from src.repo_fetcher import RepoFetcher
 
 
 class DeploymentContractTests(unittest.TestCase):
+    def test_cuda_requirement_is_scoped_to_sagemaker_deployment(self):
+        dockerfile = (SERVER_ROOT / "Dockerfile").read_text(encoding="utf-8")
+        local_test = (REPOSITORY_ROOT / "scripts/test-local-sagemaker.sh").read_text(
+            encoding="utf-8"
+        )
+        deploy_script = (REPOSITORY_ROOT / "scripts/deploy.sh").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertNotIn("REQUIRE_CUDA=1", dockerfile)
+        self.assertIn('REQUIRE_CUDA="${REQUIRE_CUDA:-0}"', local_test)
+        self.assertIn('require_cuda "${REQUIRE_CUDA:-1}"', deploy_script)
+        self.assertIn("REQUIRE_CUDA:$require_cuda", deploy_script)
+
     def test_sagemaker_routes_are_registered(self):
         routes = {(route.path, method) for route in app.routes for method in route.methods}
         self.assertIn(("/ping", "GET"), routes)
@@ -76,6 +91,23 @@ class DeploymentContractTests(unittest.TestCase):
             self.assertEqual(fetcher.base_dir, cache_dir)
             self.assertTrue((cache_dir / "example-project" / "README.md").exists())
             self.assertEqual(repository["local_path"], str(cache_dir / "example-project"))
+
+    def test_repo_filtering_profile_counts_included_and_skipped_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "main.py").write_text("print('ok')\n", encoding="utf-8")
+            (root / "package-lock.json").write_text("{}\n", encoding="utf-8")
+            (root / "image.png").write_bytes(b"not-an-image")
+            profile = {}
+
+            files = list(RepoFetcher(base_dir=directory).iter_source_files(root, profile))
+
+        self.assertEqual([path.name for path in files], ["main.py"])
+        self.assertEqual(profile["files_scanned"], 3)
+        self.assertEqual(profile["files_included"], 1)
+        self.assertEqual(profile["files_skipped"], 2)
+        self.assertEqual(profile["skipped_ignored_filename"], 1)
+        self.assertEqual(profile["skipped_unsupported_type"], 1)
 
 
 if __name__ == "__main__":

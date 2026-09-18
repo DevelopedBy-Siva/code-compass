@@ -1,4 +1,5 @@
 import re
+import time
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -131,20 +132,40 @@ class CodeParser:
             self.parsers[language] = get_parser(language)
         return self.parsers[language]
 
-    def chunk_file(self, file_path: str, repo_root: str) -> List[Dict]:
+    def chunk_file(
+        self,
+        file_path: str,
+        repo_root: str,
+        profile: Optional[dict] = None,
+    ) -> List[Dict]:
+        read_started_at = time.perf_counter()
         language = self.detect_language(file_path)
         source = Path(file_path).read_text(encoding="utf-8", errors="ignore")
         source_bytes = source.encode("utf-8")
         relative_path = str(Path(file_path).resolve().relative_to(Path(repo_root).resolve()))
+        read_seconds = time.perf_counter() - read_started_at
 
         if not source.strip():
+            self._update_profile(profile, read_seconds, 0.0, 0.0, 0)
             return []
 
         parser = self._get_parser(language)
         if parser is None:
-            return self._fallback_chunks(source, relative_path, language)
+            chunk_started_at = time.perf_counter()
+            chunks = self._fallback_chunks(source, relative_path, language)
+            self._update_profile(
+                profile,
+                read_seconds,
+                0.0,
+                time.perf_counter() - chunk_started_at,
+                len(chunks),
+            )
+            return chunks
 
+        parse_started_at = time.perf_counter()
         tree = parser.parse(source_bytes)
+        parse_seconds = time.perf_counter() - parse_started_at
+        chunk_started_at = time.perf_counter()
         lines = source.splitlines()
         chunks = []
         capture_types = SYMBOL_NODE_TYPES.get(language, set())
@@ -188,7 +209,31 @@ class CodeParser:
         if file_overview:
             chunks.insert(0, file_overview)
 
+        self._update_profile(
+            profile,
+            read_seconds,
+            parse_seconds,
+            time.perf_counter() - chunk_started_at,
+            len(chunks),
+        )
         return chunks
+
+    @staticmethod
+    def _update_profile(
+        profile: Optional[dict],
+        read_seconds: float,
+        parse_seconds: float,
+        chunk_seconds: float,
+        chunk_count: int,
+    ) -> None:
+        if profile is None:
+            return
+        profile.update(
+            read_seconds=read_seconds,
+            parse_seconds=parse_seconds,
+            chunk_seconds=chunk_seconds,
+            chunk_count=chunk_count,
+        )
 
     def _build_chunk(
         self,
