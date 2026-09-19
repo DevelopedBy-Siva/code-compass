@@ -1,7 +1,38 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import axios from "axios";
-import { ArrowRight, ChevronLeft, ChevronRight, Compass, Link2, MapPinned, Plus, Wrench } from "lucide-react";
+import { PrismLight as SyntaxHighlighter } from "react-syntax-highlighter";
+import bash from "react-syntax-highlighter/dist/esm/languages/prism/bash";
+import c from "react-syntax-highlighter/dist/esm/languages/prism/c";
+import cpp from "react-syntax-highlighter/dist/esm/languages/prism/cpp";
+import go from "react-syntax-highlighter/dist/esm/languages/prism/go";
+import java from "react-syntax-highlighter/dist/esm/languages/prism/java";
+import javascript from "react-syntax-highlighter/dist/esm/languages/prism/javascript";
+import jsx from "react-syntax-highlighter/dist/esm/languages/prism/jsx";
+import json from "react-syntax-highlighter/dist/esm/languages/prism/json";
+import python from "react-syntax-highlighter/dist/esm/languages/prism/python";
+import rust from "react-syntax-highlighter/dist/esm/languages/prism/rust";
+import tsx from "react-syntax-highlighter/dist/esm/languages/prism/tsx";
+import typescript from "react-syntax-highlighter/dist/esm/languages/prism/typescript";
+import yaml from "react-syntax-highlighter/dist/esm/languages/prism/yaml";
+import { vscDarkPlus } from "react-syntax-highlighter/dist/esm/styles/prism";
+import { ArrowRight, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Code2, Compass, Files, Link2, MapPinned, Plus, Wrench } from "lucide-react";
 import { API_URL, getSessionHeaders, getSessionId, resetSessionId } from "./config";
+
+[
+  ["bash", bash],
+  ["c", c],
+  ["cpp", cpp],
+  ["go", go],
+  ["java", java],
+  ["javascript", javascript],
+  ["jsx", jsx],
+  ["json", json],
+  ["python", python],
+  ["rust", rust],
+  ["tsx", tsx],
+  ["typescript", typescript],
+  ["yaml", yaml],
+].forEach(([name, language]) => SyntaxHighlighter.registerLanguage(name, language));
 
 function App() {
   const [sessionId, setSessionId] = useState(() => getSessionId());
@@ -517,11 +548,137 @@ function WorkspaceScreen({
 }
 
 function AnswerBlock({ answer }) {
+  const snippets = answer.implementation_snippets || [];
+  const relatedFiles = answer.related_files || [];
+
   return (
-    <div className="space-y-4 text-sm leading-7 text-zinc-100">
-      <MarkdownAnswer value={answer.answer} />
+    <div className="space-y-7 text-sm leading-7 text-zinc-100">
+      <AnswerSection eyebrow="Answer">
+        <MarkdownAnswer value={answer.direct_answer || answer.answer} />
+      </AnswerSection>
+
+      {snippets.length > 0 ? (
+        <AnswerSection eyebrow="Relevant implementation">
+          <div className="space-y-4">
+            {snippets.map((snippet, index) => (
+              <ImplementationSnippet
+                key={`${snippet.file_path}-${snippet.line_start}-${index}`}
+                snippet={snippet}
+              />
+            ))}
+          </div>
+        </AnswerSection>
+      ) : null}
+
+      {answer.why_this_code_matters ? (
+        <AnswerSection eyebrow="Why this code matters">
+          <MarkdownAnswer value={answer.why_this_code_matters} />
+        </AnswerSection>
+      ) : null}
+
+      {relatedFiles.length > 0 ? (
+        <AnswerSection eyebrow="Related files">
+          <div className="overflow-hidden rounded-2xl border border-white/10 bg-black/20">
+            {relatedFiles.map((file, index) => (
+              <div
+                key={`${file.file_path}-${index}`}
+                className="flex gap-3 border-b border-white/10 px-4 py-3 last:border-b-0"
+              >
+                <Files className="mt-1 h-4 w-4 shrink-0 text-zinc-500" strokeWidth={1.8} />
+                <div className="min-w-0">
+                  <p className="break-all font-mono text-xs font-medium leading-6 text-zinc-100">
+                    {file.file_path}
+                  </p>
+                  <p className="text-xs leading-5 text-zinc-400">{file.description}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+        </AnswerSection>
+      ) : null}
     </div>
   );
+}
+
+function AnswerSection({ eyebrow, children }) {
+  return (
+    <section>
+      <h3 className="mb-3 text-[11px] font-semibold uppercase tracking-[0.22em] text-zinc-500">
+        {eyebrow}
+      </h3>
+      {children}
+    </section>
+  );
+}
+
+function ImplementationSnippet({ snippet }) {
+  const [expanded, setExpanded] = useState(false);
+  const code = expanded ? snippet.expanded_code : snippet.code;
+  const lineStart = expanded ? snippet.expanded_line_start : snippet.line_start;
+  const lineEnd = expanded ? snippet.expanded_line_end : snippet.line_end;
+
+  return (
+    <div className="overflow-hidden rounded-2xl border border-white/10 bg-[#09090b]">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/10 px-4 py-3">
+        <div className="flex min-w-0 items-center gap-2.5">
+          <Code2 className="h-4 w-4 shrink-0 text-zinc-500" strokeWidth={1.9} />
+          <div className="min-w-0">
+            <p className="truncate font-mono text-xs font-medium text-zinc-100">
+              {snippet.file_path}
+            </p>
+            <p className="mt-0.5 truncate text-[11px] text-zinc-500">
+              {snippet.symbol_name || "Relevant code"} · lines {lineStart}–{lineEnd}
+            </p>
+          </div>
+        </div>
+        {snippet.expandable ? (
+          <button
+            className="inline-flex items-center gap-1.5 rounded-full border border-white/10 px-2.5 py-1 text-[11px] font-medium text-zinc-400 transition hover:border-white/20 hover:text-white"
+            onClick={() => setExpanded((value) => !value)}
+            type="button"
+          >
+            {expanded ? (
+              <ChevronUp className="h-3.5 w-3.5" strokeWidth={2} />
+            ) : (
+              <ChevronDown className="h-3.5 w-3.5" strokeWidth={2} />
+            )}
+            {expanded ? "Collapse" : "Expand"}
+          </button>
+        ) : null}
+      </div>
+      <div className="scrollbar-thin overflow-x-auto">
+        <SyntaxHighlighter
+          language={normalizeSyntaxLanguage(snippet.language)}
+          style={vscDarkPlus}
+          showLineNumbers
+          startingLineNumber={lineStart}
+          wrapLongLines={false}
+          customStyle={{
+            background: "transparent",
+            margin: 0,
+            padding: "1rem",
+            fontSize: "12px",
+            lineHeight: "1.65",
+          }}
+          lineNumberStyle={{ color: "#52525b", minWidth: "2.75em" }}
+        >
+          {code || ""}
+        </SyntaxHighlighter>
+      </div>
+    </div>
+  );
+}
+
+function normalizeSyntaxLanguage(language) {
+  const aliases = {
+    js: "javascript",
+    jsx: "jsx",
+    py: "python",
+    rs: "rust",
+    ts: "typescript",
+    tsx: "tsx",
+  };
+  return aliases[language] || language || "text";
 }
 
 function MarkdownAnswer({ value }) {

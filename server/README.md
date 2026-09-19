@@ -52,7 +52,7 @@ Configuration:
 - `QDRANT_EVAL_COLLECTION=code_compass_eval_qwen3_embedding_0_6b_last_token_cache_v2`
 - `QDRANT_UPSERT_BATCH_SIZE=64`
 - `QDRANT_TIMEOUT_SECONDS=60`
-- `ENABLE_PROFILING=false` (set to `true` for detailed timing logs)
+- `ENABLE_PROFILING=false` (set to `true` to retain detailed timing data in process; it is not emitted to CloudWatch)
 
 The evaluation runner always uses `QDRANT_EVAL_COLLECTION`, preventing a
 reindexing evaluation from deleting the application's collection.

@@ -1,3 +1,4 @@
+import json
 import os
 import time
 from contextlib import asynccontextmanager
@@ -53,10 +54,10 @@ async def lifespan(application: FastAPI):
     settings = Settings.from_env()
     configure_logging(settings.log_level)
     application.state.ready = False
-    startup_logger.info("application starting")
+    startup_logger.info("Application starting")
     application.state.rag_system = CodebaseRAGSystem(settings=settings)
     application.state.ready = True
-    startup_logger.info("application ready")
+    startup_logger.info("Application ready")
     try:
         yield
     finally:
@@ -180,7 +181,7 @@ async def query_repository(
 ):
     started_at = time.perf_counter()
     question = body.question.strip()
-    query_logger.info("%s", fields(question=question))
+    query_logger.info("question=%s", json.dumps(question, ensure_ascii=False))
     try:
         response = rag_system.answer_question(
             repo_id=body.repo_id,
@@ -200,7 +201,14 @@ async def query_repository(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
-        error_logger.exception("%s", fields(operation="query", exception=exc))
+        error_logger.exception(
+            "%s",
+            fields(
+                operation="query",
+                message="Query failed",
+                error_type=type(exc).__name__,
+            ),
+        )
         raise HTTPException(status_code=500, detail="Query failed") from exc
 
 
@@ -260,4 +268,6 @@ if __name__ == "__main__":
         port=int(os.getenv("PORT", "8080")),
         reload=False,
         workers=1,
+        access_log=False,
+        log_level="warning",
     )

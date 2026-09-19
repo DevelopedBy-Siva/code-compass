@@ -13,7 +13,9 @@ if str(SERVER_ROOT) not in sys.path:
     sys.path.insert(0, str(SERVER_ROOT))
 
 from src.app_logging import (
+    APPLICATION_CATEGORIES,
     RequestIdMiddleware,
+    THIRD_PARTY_LOG_LEVELS,
     _ContextFilter,
     bind_request_id,
     get_logger,
@@ -23,6 +25,56 @@ from src.app_logging import (
 
 
 class LoggingTests(unittest.TestCase):
+    def test_only_operational_application_categories_are_allowed(self):
+        self.assertEqual(
+            APPLICATION_CATEGORIES,
+            {"startup", "index", "query", "error"},
+        )
+        with self.assertRaisesRegex(ValueError, "Unknown log category"):
+            get_logger("app")
+
+    def test_uncategorized_dependency_record_is_retained_as_error(self):
+        record = logging.LogRecord("httpx", logging.WARNING, "", 0, "retry", (), None)
+
+        retained = _ContextFilter().filter(record)
+
+        self.assertTrue(retained)
+        self.assertEqual(record.request_id, "system")
+        self.assertEqual(record.category, "error")
+
+    def test_routine_dependency_record_is_dropped(self):
+        record = logging.LogRecord(
+            "qdrant_client.http.api_client",
+            logging.INFO,
+            "",
+            0,
+            "request",
+            (),
+            None,
+        )
+
+        self.assertFalse(_ContextFilter().filter(record))
+
+    def test_noisy_dependencies_are_warning_or_higher(self):
+        expected = {
+            "httpx",
+            "httpcore",
+            "urllib3",
+            "qdrant_client",
+            "botocore",
+            "boto3",
+            "transformers",
+            "huggingface_hub",
+        }
+
+        self.assertTrue(expected.issubset(THIRD_PARTY_LOG_LEVELS))
+        self.assertTrue(
+            all(
+                THIRD_PARTY_LOG_LEVELS[name] >= logging.WARNING
+                for name in expected
+            )
+        )
+
     def test_log_record_contains_request_id_and_category(self):
         stream = io.StringIO()
         handler = logging.StreamHandler(stream)

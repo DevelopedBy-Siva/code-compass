@@ -168,36 +168,33 @@ class ConversationPlanningTests(unittest.TestCase):
 
 
 class AnswerExperienceTests(unittest.TestCase):
-    def test_overview_prompt_requires_all_structured_sections(self):
+    def test_prompt_requires_layered_repository_answer(self):
         system = CodebaseRAGSystem.__new__(CodebaseRAGSystem)
         system.llm_model = "test-model"
         system.indexing_progress = {}
-        overview = """## Purpose
-Explains a project. [1]
+        layered_answer = """## Answer
+The request enters the API handler and is passed to the service. [1]
 
-## Architecture
-A service. [1]
+## Relevant implementation
+[IMPLEMENTATION_SNIPPETS]
 
-## Technologies
-- Python [1]
+## Why this code matters
+This function owns the handoff from HTTP input to the service layer. [1]
 
-## Main components
-- `app.py` — API [1]
-
-## Request flow
-Input → API → response. [1]
+## Related files
+- `app.py` — Receives the request and invokes the service. [1]
 """
-        system.llm_client = _FakeBedrock([overview])
+        system.llm_client = _FakeBedrock([layered_answer])
         trace = {}
         source = {
-            "file_path": "README.md",
-            "language": "text",
-            "symbol_name": "README.md",
-            "symbol_type": "module",
+            "file_path": "app.py",
+            "language": "python",
+            "symbol_name": "handle_request",
+            "symbol_type": "function_definition",
             "line_start": 1,
-            "line_end": 20,
-            "signature": "",
-            "content": "Project purpose, architecture, Python API, and request flow.",
+            "line_end": 4,
+            "signature": "def handle_request(request):",
+            "content": "def handle_request(request):\n    payload = request.json()\n    result = service.run(payload)\n    return result",
             "semantic_score": 0.9,
             "bm25_score": 1.0,
             "rrf_score": 0.03,
@@ -212,18 +209,73 @@ Input → API → response. [1]
             trace=trace,
         )
 
-        self.assertTrue(system._has_structured_overview(result["answer"]))
-        self.assertIn("## Purpose", trace["final_prompt"])
+        self.assertEqual(result["answer"], result["direct_answer"])
+        self.assertIn("request enters the API handler", result["direct_answer"])
+        self.assertIn("owns the handoff", result["why_this_code_matters"])
+        self.assertEqual(result["implementation_snippets"][0]["file_path"], "app.py")
+        self.assertEqual(result["related_files"][0]["file_path"], "app.py")
+        self.assertIn("## Relevant implementation", trace["final_prompt"])
         self.assertIn("Standalone interpretation", trace["final_prompt"])
 
-    def test_structured_overview_validator_rejects_missing_section(self):
-        incomplete = """## Purpose
-Purpose.
+    def test_layered_answer_validator_rejects_missing_section(self):
+        incomplete = """## Answer
+Direct answer.
 
-## Architecture
-Architecture.
+## Relevant implementation
+[IMPLEMENTATION_SNIPPETS]
 """
-        self.assertFalse(CodebaseRAGSystem._has_structured_overview(incomplete))
+        self.assertFalse(CodebaseRAGSystem._has_layered_answer(incomplete))
+
+    def test_snippet_is_centered_and_never_exceeds_twenty_lines(self):
+        content = "\n".join(f"line {index}" for index in range(1, 51))
+        source = {
+            "file_path": "src/service.py",
+            "language": "python",
+            "symbol_name": "target_handler",
+            "line_start": 100,
+            "signature": "def target_handler():",
+            "content": content.replace("line 27", "def target_handler():"),
+        }
+
+        snippet = CodebaseRAGSystem._extract_display_snippet(source)
+
+        self.assertLessEqual(len(snippet["code"].splitlines()), 20)
+        self.assertIn("def target_handler():", snippet["code"])
+        self.assertTrue(snippet["expandable"])
+        self.assertLessEqual(len(snippet["expanded_code"].splitlines()), 60)
+
+    def test_implementation_sources_rank_above_tests_and_docs(self):
+        sources = [
+            {
+                "id": "docs",
+                "file_path": "README.md",
+                "language": "text",
+                "symbol_type": "fallback_chunk",
+                "final_score": 1.0,
+            },
+            {
+                "id": "test",
+                "file_path": "tests/test_service.py",
+                "language": "python",
+                "symbol_type": "function_definition",
+                "final_score": 0.9,
+            },
+            {
+                "id": "impl",
+                "file_path": "src/service.py",
+                "language": "python",
+                "symbol_type": "function_definition",
+                "final_score": 0.8,
+            },
+        ]
+
+        ranked = CodebaseRAGSystem._rank_sources_for_answer(
+            "How is the service implemented?",
+            sources,
+        )
+
+        self.assertEqual(ranked[0]["id"], "impl")
+        self.assertEqual(ranked[-1]["id"], "test")
 
 
 if __name__ == "__main__":

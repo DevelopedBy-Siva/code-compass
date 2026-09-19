@@ -8,11 +8,10 @@ import torch
 import torch.nn.functional as F
 from transformers import AutoModel, AutoTokenizer
 
-from src.app_logging import fields, get_logger, profiling_enabled
+from src.app_logging import get_logger, profiling_enabled
 
 
 startup_logger = get_logger("startup")
-profile_logger = get_logger("profile")
 
 QWEN_EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-0.6B"
 RETRIEVAL_INSTRUCTION = (
@@ -43,18 +42,11 @@ class EmbeddingGenerator:
                 "Check the container CUDA runtime and SageMaker host driver compatibility."
             )
 
+        startup_logger.info("CUDA available=%s", str(cuda_available).lower())
         startup_logger.info(
-            "CUDA %s",
-            fields(
-                available=str(cuda_available).lower(),
-                device=(
-                    torch.cuda.get_device_name(0)
-                    if cuda_available
-                    else self.device
-                ),
-            ),
+            "Device=%s",
+            torch.cuda.get_device_name(0) if cuda_available else self.device,
         )
-        started_at = time.perf_counter()
         self.tokenizer = AutoTokenizer.from_pretrained(
             self.model_name,
             trust_remote_code=True,
@@ -71,24 +63,7 @@ class EmbeddingGenerator:
         self.model.eval()
         self.embedding_dim = int(self.model.config.hidden_size)
         self.model_device = str(next(self.model.parameters()).device)
-        elapsed = time.perf_counter() - started_at
-        startup_logger.info(
-            "embedding model loaded %s",
-            fields(
-                model=self.model_name,
-                dimension=self.embedding_dim,
-                load_time=f"{elapsed:.2f}s",
-            ),
-        )
-        self._log_profile(
-            "embedding_device",
-            cuda_available=cuda_available,
-            device=self.device,
-            gpu_name=(torch.cuda.get_device_name(0) if cuda_available else None),
-            model_device=self.model_device,
-            batch_size=self.batch_size,
-            model_name=self.model_name,
-        )
+        startup_logger.info("Embedding model loaded")
 
     def embed_text(self, text: str) -> np.ndarray:
         query = f"Instruct: {RETRIEVAL_INSTRUCTION}\nQuery: {text}"
@@ -123,7 +98,6 @@ class EmbeddingGenerator:
                 **profile,
             }
             batch_profiles.append(batch_profile)
-            self._log_profile("embedding_batch", **batch_profile)
             if progress_callback:
                 progress_callback(completed, total)
 
@@ -167,7 +141,6 @@ class EmbeddingGenerator:
             "best_batch": batch_profiles[best_index],
             **gpu_profile,
         }
-        self._log_profile("embedding_summary", **self.last_profile)
         return np.vstack(all_embeddings).astype("float32")
 
     def get_embedding_dim(self) -> int:
@@ -302,7 +275,3 @@ class EmbeddingGenerator:
             if value is not None:
                 result = value
         return result
-
-    def _log_profile(self, event: str, **values) -> None:
-        if self.enable_profiling:
-            profile_logger.info("%s", fields(event=event, **values))

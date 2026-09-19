@@ -93,7 +93,7 @@ The local deployment test runs the production image as its non-root user, exerci
 
 ### Structured logging
 
-Every request receives a correlation ID. Optional profiling records parsing, embedding batches, GPU utilization, Qdrant uploads, conversation rewrites, retrieval queries, and the final Bedrock prompt.
+Every request receives a correlation ID. Runtime logs use only `[startup]`, `[index]`, `[query]`, and `[error]` categories. Routine dependency HTTP traffic and Uvicorn access records are suppressed, while warnings and errors remain visible. Index logs report repository, file/chunk counts, embedding time, and total time; query logs report the question, any rewrite, retrieved-document count, and latency.
 
 ## Performance
 

@@ -7,11 +7,10 @@ from uuid import uuid4
 import numpy as np
 from qdrant_client import QdrantClient, models
 
-from src.app_logging import fields, get_logger, profiling_enabled
+from src.app_logging import get_logger, profiling_enabled
 
 
 startup_logger = get_logger("startup")
-profile_logger = get_logger("profile")
 
 
 class QdrantVectorStore:
@@ -63,10 +62,7 @@ class QdrantVectorStore:
 
         self._collection_ready = False
         self._ensure_collection()
-        startup_logger.info(
-            "Qdrant connected %s",
-            fields(collection=self.collection_name),
-        )
+        startup_logger.info("Qdrant connected")
 
     def _ensure_collection(self) -> bool:
         if self.client.collection_exists(collection_name=self.collection_name):
@@ -212,8 +208,6 @@ class QdrantVectorStore:
                 ),
             }
             request_profiles.append(request_profile)
-            self._log_profile("qdrant_upsert", **request_profile)
-
         total_upload_seconds = time.perf_counter() - upload_started_at
         latencies = [item["seconds"] for item in request_profiles]
         points_per_request = [item["points"] for item in request_profiles]
@@ -229,13 +223,7 @@ class QdrantVectorStore:
                 "individual" if max(points_per_request) == 1 else "batched"
             ),
         }
-        self._log_profile("qdrant_summary", **self.last_upsert_profile)
-
         return ids
-
-    def _log_profile(self, event: str, **values) -> None:
-        if self.enable_profiling:
-            profile_logger.info("%s", fields(event=event, **values))
 
     def get_repository_chunks(
         self,

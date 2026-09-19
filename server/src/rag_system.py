@@ -23,7 +23,6 @@ BEDROCK_QWEN_MODEL_ID = os.getenv("BEDROCK_MODEL_ID", "qwen.qwen3-coder-next")
 index_logger = get_logger("index")
 query_logger = get_logger("query")
 error_logger = get_logger("error")
-profile_logger = get_logger("profile")
 
 
 class SessionCancelledError(RuntimeError):
@@ -441,16 +440,19 @@ class CodebaseRAGSystem:
             self._log_index_summary(
                 repo,
                 timings,
-                filtering_profile,
-                parsing_profile,
-                total_files,
+                file_count,
                 len(chunk_payloads),
             )
         except Exception as exc:
             if not isinstance(exc, SessionCancelledError):
                 error_logger.exception(
                     "%s",
-                    fields(operation="index", repo_id=repo_id, exception=exc),
+                    fields(
+                        operation="index",
+                        message="Repository indexing failed",
+                        repo_id=repo_id,
+                        error_type=type(exc).__name__,
+                    ),
                 )
             recovered_from_cache = False
             if (
@@ -461,12 +463,13 @@ class CodebaseRAGSystem:
                 try:
                     self.vector_store.remove_generation(repository_key, staged_generation)
                 except Exception as cleanup_exc:
-                    index_logger.warning(
+                    error_logger.exception(
                         "%s",
                         fields(
                             operation="index_cleanup",
+                            message="Failed to remove staged Qdrant generation",
                             repo_id=repo_id,
-                            exception=cleanup_exc,
+                            error_type=type(cleanup_exc).__name__,
                         ),
                     )
             fallback_chunks = []
@@ -499,50 +502,27 @@ class CodebaseRAGSystem:
             if isinstance(exc, SessionCancelledError):
                 return
             if recovered_from_cache:
-                index_logger.warning(
-                    "%s",
-                    fields(repo_id=repo_id, status="restored_previous_cache"),
-                )
                 return
-            raise
+            # This method runs as a background task. The repository status now
+            # exposes the failure to clients; re-raising would make the ASGI
+            # server emit the same traceback a second time.
+            return
 
     def _log_index_summary(
         self,
         repo: Repository,
         timings: dict,
-        filtering_profile: dict,
-        parsing_profile: dict,
-        source_file_count: int,
+        file_count: int,
         chunk_count: int,
     ) -> None:
+        index_logger.info("%s", fields(repo=f"{repo.owner}/{repo.name}"))
+        index_logger.info("%s", fields(files=file_count, chunks=chunk_count))
         index_logger.info(
-            "%s",
-            fields(
-                repo=repo.source_url or repo.github_url,
-                files=source_file_count,
-                chunks=chunk_count,
-                total=f"{timings['total_indexing_seconds']:.2f}s",
-            ),
+            "%s", fields(embedding=f"{timings['embedding_seconds']:.2f}s")
         )
-        if self.settings.enable_profiling:
-            parsing_seconds = (
-                parsing_profile["file_read_seconds"]
-                + parsing_profile["tree_sitter_seconds"]
-                + parsing_profile["chunk_generation_seconds"]
-            )
-            profile_logger.info(
-                "%s",
-                fields(
-                    operation="index",
-                    repo_id=repo.id,
-                    parsing=f"{parsing_seconds:.2f}s",
-                    embedding=f"{timings['embedding_seconds']:.2f}s",
-                    qdrant_upload=f"{timings['qdrant_upserts_seconds']:.2f}s",
-                    files_scanned=filtering_profile.get(
-                        "files_scanned", source_file_count
-                    ),
-                ),
-            )
+        index_logger.info(
+            "%s", fields(total=f"{timings['total_indexing_seconds']:.2f}s")
+        )
 
     def restore_repository_from_cache(
         self,
@@ -632,8 +612,8 @@ class CodebaseRAGSystem:
         conversation_plan = self._plan_conversation(question, normalized_history)
         if conversation_plan.rewritten_query != question:
             query_logger.info(
-                "%s",
-                fields(rewritten_question=conversation_plan.rewritten_query),
+                "rewritten=%s",
+                json.dumps(conversation_plan.rewritten_query, ensure_ascii=False),
             )
         trace = {
             "original_query": question,
@@ -826,6 +806,10 @@ class CodebaseRAGSystem:
         if not sources:
             return {
                 "answer": "I could not find enough grounded evidence in the indexed codebase to answer that confidently.",
+                "direct_answer": "I could not find enough grounded evidence in the indexed codebase to answer that confidently.",
+                "implementation_snippets": [],
+                "why_this_code_matters": "",
+                "related_files": [],
                 "confidence": "low",
                 "sources": [],
                 "repo": self._serialize_repo(repo),
@@ -866,42 +850,43 @@ class CodebaseRAGSystem:
             )
 
         standalone_question = rewritten_query or question
-        wants_repo_overview = self._is_repo_overview_question(standalone_question)
-        question_intent = self._question_intent(standalone_question)
+        answer_mode = self._answer_mode(standalone_question)
+        implementation_snippets = self._select_implementation_snippets(
+            standalone_question,
+            sources,
+        )
+        displayed_implementations = "\n".join(
+            f"- Source {snippet['source']}: `{snippet['file_path']}` "
+            f"({snippet['symbol_name']}, lines {snippet['line_start']}-{snippet['line_end']})"
+            for snippet in implementation_snippets
+        ) or "- No concise implementation snippet was available; explain only what the sources establish."
 
         system_prompt = """
-You are answering questions as a knowledgeable teammate who has carefully read this repository.
+You are a repository understanding assistant. Help the user build a mental model of how this codebase is implemented, like a knowledgeable teammate walking through unfamiliar code.
 
 Rules:
 1. Use ONLY the supplied repository context to answer. Do not use external knowledge.
-2. Answer conversationally and directly, as if the repo is explaining itself to the user.
-3. Do not say "Based on the provided context", "The repository is about", or similar throat-clearing phrases.
-4. Be concrete about files, functions, and behavior.
-5. If evidence is partial, clearly separate what is certain from what is inferred.
-6. Respond in Markdown, not JSON.
-7. Keep the answer complete. Do not stop mid-sentence.
-8. Use short sections or bullets only when they genuinely help readability.
-9. Do not leave unfinished headings, dangling bullets, or trailing markdown markers like #, ##, or ###.
-10. Back up factual claims with inline citations. After a sentence or clause that relies on a specific source, add its number in brackets, e.g. [1] or [2][3] if multiple sources support it. Use only the source numbers given above (Source 1, Source 2, ...) and never invent a number.
-11. If you cannot answer the question using the provided context, say: "I cannot find sufficient evidence in the codebase to answer this question."
-12. Prefer the most canonical source files for API and implementation questions, such as package exports, core modules, and session/query code, over tutorial prose when they disagree in specificity.
-13. Keep the answer tight. Lead with the direct answer, then add only the most important supporting detail.
-"""
+2. Return all four Markdown sections below, in exactly this order. Do not add other top-level sections:
+   ## Answer
+   ## Relevant implementation
+   ## Why this code matters
+   ## Related files
+3. Under Answer, answer the question first in no more than 2-3 concise paragraphs. Do not start with code or a file list.
+4. Under Relevant implementation, write exactly: [IMPLEMENTATION_SNIPPETS]. The application inserts concise, syntax-highlighted code selected from the cited sources here. Do not write or repeat code yourself.
+5. Under Why this code matters, explain how the displayed functions, classes, or configuration produce the behavior in the answer. Do not merely repeat the direct answer.
+6. Under Related files, list up to four implementation-relevant files as bullets in this exact form: - `path/to/file` — responsibility. Prefer implementation, then interfaces, configuration, documentation, and lastly tests. Do not invent paths.
+7. Back factual claims with inline citations such as [1] or [2][3]. Use only the supplied source numbers.
+8. Be concrete about execution flow, files, symbols, boundaries, and configuration. If evidence is partial, distinguish facts from inference.
+9. Do not say "Based on the provided context" or use similar throat-clearing language.
+10. If the sources are insufficient, say so plainly. Never fill gaps with external knowledge.
+11. Keep every section complete. Do not leave unfinished headings, bullets, or Markdown.
+12. Avoid returning only prose or only code: the final product experience must always pair an explanation with the selected implementation when one is available.
 
-        if wants_repo_overview:
-            system_prompt += """
-14. For repository overview questions, always use these five Markdown sections in this exact order: "## Purpose", "## Architecture", "## Technologies", "## Main components", and "## Request flow".
-15. Under Purpose, give a direct one or two sentence summary of what the repository does and the problem it solves.
-16. Under Architecture, explain the high-level structure and major boundaries. Under Technologies, use a concise bullet list of the languages, frameworks, infrastructure, and external services evidenced by the sources.
-17. Under Main components, use bullets naming the important modules or directories and their responsibilities. Under Request flow, give a short numbered or arrow-style sequence from user input to final response; say when a step is not evidenced rather than inventing it.
-18. Prioritize README and top-level documentation when present, then use code to support the explanation. Keep all five sections even when evidence for one is limited.
-"""
-        elif question_intent in {"api", "implementation", "cross_file", "error_handling", "setup"}:
-            system_prompt += """
-14. For API, implementation, setup, and cross-file questions, prefer the smallest correct answer that is directly supported by code.
-15. If a detail comes only from docs or examples and not from the canonical implementation, say that clearly instead of presenting it as core behavior.
-16. When describing exports or code paths, name the file first and keep the explanation precise.
-17. Default to one short paragraph plus at most 3 short bullets. Avoid long explanatory walkthroughs unless the question explicitly asks for depth.
+Question-specific guidance:
+- Architecture: describe the participating components and their handoffs; relate multiple displayed files.
+- Implementation: focus on the primary implementation and the behavior it owns.
+- Configuration: explain the relevant setting, default, and where it is consumed.
+- Debugging: trace the execution path and identify the branch or boundary most relevant to the symptom.
 """
 
         joined_context = "\n\n".join(context_blocks)
@@ -918,6 +903,11 @@ Recent conversation:
 Standalone interpretation of the question:
 {rewritten_query or question}
 
+Answer mode: {answer_mode}
+
+Implementations the application will display between the Answer and Why sections:
+{displayed_implementations}
+
 Now answer this question using only the context above:
 {question}
 """
@@ -928,20 +918,17 @@ Now answer this question using only the context above:
             trace=trace,
         )
 
-        if wants_repo_overview and not self._has_structured_overview(answer_text):
-            overview_repair_prompt = """
-Rewrite the answer as a complete repository overview. It must contain all five
-of these Markdown headings, in this order, with grounded content beneath each:
-## Purpose
-## Architecture
-## Technologies
-## Main components
-## Request flow
-Do not add facts that are absent from the repository context.
+        if not self._has_layered_answer(answer_text):
+            layered_repair_prompt = """
+Rewrite the draft into the required four-section repository-understanding answer.
+Use these exact headings in order: ## Answer, ## Relevant implementation,
+## Why this code matters, and ## Related files. Put only
+[IMPLEMENTATION_SNIPPETS] under Relevant implementation. Keep the direct answer
+to 2-3 concise paragraphs and do not add facts absent from the context.
 """
             answer_text, finish_reason = self._generate_markdown_response(
                 system_prompt,
-                f"{user_prompt.strip()}\n\n{overview_repair_prompt.strip()}",
+                f"{user_prompt.strip()}\n\n{layered_repair_prompt.strip()}",
                 trace=trace,
             )
 
@@ -960,9 +947,9 @@ Draft answer:
             )
             if self._looks_incomplete(answer_text, finish_reason):
                 short_prompt = """
-Answer the question again, but keep it concise and complete.
-Use 2 short paragraphs or 4-6 bullets max.
-Do not leave the answer unfinished.
+Answer again using all four required headings. Keep Answer to one short paragraph,
+use [IMPLEMENTATION_SNIPPETS] for Relevant implementation, add one short paragraph
+for Why this code matters, and at most three Related files bullets.
 """
                 answer_text, _ = self._generate_markdown_response(
                     system_prompt,
@@ -972,11 +959,22 @@ Do not leave the answer unfinished.
 
         answer_text = self._finalize_answer(answer_text)
         answer_text, citations = self._attach_citations(answer_text, sources)
+        layered_answer = self._parse_layered_answer(
+            answer_text,
+            sources,
+            question=standalone_question,
+        )
         confidence = self._estimate_confidence(sources)
-        summary = " ".join(answer_text.split())[:160] if answer_text else ""
+        direct_answer = layered_answer["direct_answer"]
+        summary = " ".join(direct_answer.split())[:160] if direct_answer else ""
 
         return {
-            "answer": answer_text,
+            # Keep `answer` as the conversational text for history and older clients.
+            "answer": direct_answer,
+            "direct_answer": direct_answer,
+            "implementation_snippets": implementation_snippets,
+            "why_this_code_matters": layered_answer["why_this_code_matters"],
+            "related_files": layered_answer["related_files"],
             "confidence": confidence,
             "summary": summary,
             "citations": citations,
@@ -1121,13 +1119,12 @@ Do not leave the answer unfinished.
         return False
 
     @staticmethod
-    def _has_structured_overview(answer_text: str) -> bool:
+    def _has_layered_answer(answer_text: str) -> bool:
         expected = (
-            "purpose",
-            "architecture",
-            "technologies",
-            "main components",
-            "request flow",
+            "answer",
+            "relevant implementation",
+            "why this code matters",
+            "related files",
         )
         headings = [
             match.group(1).strip().lower()
@@ -1144,6 +1141,215 @@ Do not leave the answer unfinished.
             except ValueError:
                 return False
         return positions == sorted(positions)
+
+    @classmethod
+    def _parse_layered_answer(
+        cls,
+        answer_text: str,
+        sources: List[dict],
+        question: str = "",
+    ) -> dict:
+        """Turn the model's constrained Markdown into a stable UI contract."""
+        section_pattern = re.compile(
+            r"^#{1,3}\s+(Answer|Relevant implementation|Why this code matters|Related files)\s*$",
+            flags=re.IGNORECASE | re.MULTILINE,
+        )
+        matches = list(section_pattern.finditer(answer_text or ""))
+        sections = {}
+        for index, match in enumerate(matches):
+            start = match.end()
+            end = matches[index + 1].start() if index + 1 < len(matches) else len(answer_text)
+            sections[match.group(1).strip().lower()] = answer_text[start:end].strip()
+
+        direct_answer = sections.get("answer", "").strip()
+        why = sections.get("why this code matters", "").strip()
+        if not direct_answer:
+            direct_answer = (answer_text or "").strip()
+
+        source_by_path = {
+            str(source.get("file_path") or ""): source
+            for source in sources
+            if source.get("file_path")
+        }
+        related_files = []
+        seen_paths = set()
+        allow_tests = cls._question_intent(question) == "tests"
+        for raw_line in sections.get("related files", "").splitlines():
+            match = re.match(
+                r"^\s*[-*]\s+`?([^`]+?)`?(?:\s+—\s+|\s+–\s+|\s+-\s+)(.+?)\s*$",
+                raw_line,
+            )
+            if not match:
+                continue
+            path = match.group(1).strip().strip("`")
+            if (
+                path not in source_by_path
+                or path in seen_paths
+                or (cls._is_test_source(source_by_path[path]) and not allow_tests)
+            ):
+                continue
+            description = match.group(2).strip()
+            related_files.append(
+                {
+                    "file_path": path,
+                    "description": description,
+                    "symbol_name": source_by_path[path].get("symbol_name"),
+                }
+            )
+            seen_paths.add(path)
+            if len(related_files) == 4:
+                break
+
+        if not related_files:
+            for source in sources:
+                path = str(source.get("file_path") or "")
+                if (
+                    not path
+                    or path in seen_paths
+                    or (cls._is_test_source(source) and not allow_tests)
+                ):
+                    continue
+                related_files.append(
+                    {
+                        "file_path": path,
+                        "description": cls._default_related_file_description(source),
+                        "symbol_name": source.get("symbol_name"),
+                    }
+                )
+                seen_paths.add(path)
+                if len(related_files) == 4:
+                    break
+
+        return {
+            "direct_answer": direct_answer,
+            "why_this_code_matters": why,
+            "related_files": related_files,
+        }
+
+    @staticmethod
+    def _default_related_file_description(source: dict) -> str:
+        symbol = source.get("symbol_name")
+        category = CodebaseRAGSystem._source_category(source)
+        if symbol and symbol != source.get("file_path"):
+            return f"Defines the {symbol} {category} used by this behavior."
+        descriptions = {
+            "implementation": "Contains the implementation for this behavior.",
+            "interface": "Defines the interface or type boundary.",
+            "configuration": "Configures this behavior.",
+            "documentation": "Documents the intended behavior.",
+            "test": "Exercises this behavior.",
+        }
+        return descriptions.get(category, "Participates in this behavior.")
+
+    @staticmethod
+    def _answer_mode(question: str) -> str:
+        normalized = " ".join((question or "").lower().split())
+        if any(
+            token in normalized
+            for token in {"debug", "error", "exception", "fail", "failure", "trace", "broken", "not work"}
+        ):
+            return "debugging"
+        if any(
+            token in normalized
+            for token in {"config", "setting", "environment", "env var", "configure", "configuration"}
+        ):
+            return "configuration"
+        if CodebaseRAGSystem._is_repo_overview_question(normalized) or any(
+            token in normalized
+            for token in {"architecture", "across files", "code path", "request flow", "lifecycle"}
+        ):
+            return "architecture"
+        return "implementation"
+
+    @classmethod
+    def _select_implementation_snippets(
+        cls,
+        question: str,
+        sources: List[dict],
+    ) -> List[dict]:
+        mode = cls._answer_mode(question)
+        intent = cls._question_intent(question)
+        snippet_limit = 2 if mode in {"architecture", "debugging"} else 1
+        ranked = cls._rank_sources_for_answer(question, sources, snippets=True)
+        preferred = (
+            ranked
+            if intent == "tests"
+            else [
+                source
+                for source in ranked
+                if cls._source_category(source) not in {"documentation", "test"}
+            ]
+        )
+        if not preferred:
+            preferred = [source for source in ranked if not cls._is_test_source(source)]
+        if not preferred:
+            preferred = ranked
+
+        snippets = []
+        used_paths = set()
+        for source in preferred:
+            path = source.get("file_path") or ""
+            if not path or path in used_paths:
+                continue
+            snippet = cls._extract_display_snippet(source)
+            snippet["source"] = next(
+                (
+                    index
+                    for index, original in enumerate(sources, start=1)
+                    if original.get("id") == source.get("id")
+                    or (
+                        original.get("file_path") == source.get("file_path")
+                        and original.get("symbol_name") == source.get("symbol_name")
+                        and original.get("line_start") == source.get("line_start")
+                    )
+                ),
+                1,
+            )
+            snippets.append(snippet)
+            used_paths.add(path)
+            if len(snippets) == snippet_limit:
+                break
+        return snippets
+
+    @staticmethod
+    def _extract_display_snippet(source: dict, max_lines: int = 20, expanded_max: int = 60) -> dict:
+        """Select a readable symbol-centered window without ever returning a whole large chunk."""
+        lines = str(source.get("content") or "").splitlines()
+        if not lines:
+            lines = [str(source.get("signature") or source.get("symbol_name") or "")]
+
+        symbol = str(source.get("symbol_name") or "").split(".")[-1]
+        signature = str(source.get("signature") or "").strip()
+        anchor = 0
+        for index, line in enumerate(lines):
+            stripped = line.strip()
+            if (signature and stripped == signature) or (symbol and re.search(rf"\b{re.escape(symbol)}\b", line)):
+                anchor = index
+                break
+
+        visible_count = min(max_lines, len(lines))
+        visible_start = max(0, anchor - 4)
+        visible_start = min(visible_start, max(0, len(lines) - visible_count))
+        visible_end = min(len(lines), visible_start + visible_count)
+
+        expanded_count = min(expanded_max, len(lines))
+        expanded_start = max(0, anchor - 8)
+        expanded_start = min(expanded_start, max(0, len(lines) - expanded_count))
+        expanded_end = min(len(lines), expanded_start + expanded_count)
+        source_line_start = int(source.get("line_start") or 1)
+
+        return {
+            "file_path": source.get("file_path"),
+            "language": source.get("language") or "text",
+            "symbol_name": source.get("symbol_name"),
+            "line_start": source_line_start + visible_start,
+            "line_end": source_line_start + visible_end - 1,
+            "code": "\n".join(lines[visible_start:visible_end]),
+            "expanded_line_start": source_line_start + expanded_start,
+            "expanded_line_end": source_line_start + expanded_end - 1,
+            "expanded_code": "\n".join(lines[expanded_start:expanded_end]),
+            "expandable": expanded_start < visible_start or expanded_end > visible_end,
+        }
 
     @staticmethod
     def _attach_citations(answer_text: str, sources: List[dict]) -> tuple[str, List[dict]]:
@@ -1375,7 +1581,11 @@ Follow-up question:
         except Exception as exc:
             error_logger.exception(
                 "%s",
-                fields(operation="query_rewrite", exception=exc),
+                fields(
+                    operation="query_rewrite",
+                    message="Question rewrite failed; using fallback",
+                    error_type=type(exc).__name__,
+                ),
             )
 
         return ConversationPlan(
@@ -1856,6 +2066,7 @@ Follow-up question:
             return []
 
         intent = self._question_intent(question)
+        results = self._rank_sources_for_answer(question, results)
         max_per_file = 2 if intent in {"overview", "docs"} else 1
         selected = []
         selected_ids = set()
@@ -1890,6 +2101,121 @@ Follow-up question:
                 break
 
         return selected
+
+    @classmethod
+    def _rank_sources_for_answer(
+        cls,
+        question: str,
+        results: List[dict],
+        snippets: bool = False,
+    ) -> List[dict]:
+        """Rank already-retrieved evidence for explanation and snippet usefulness.
+
+        This is deliberately downstream of retrieval and reranking. It only decides
+        which of those grounded candidates best communicate the implementation.
+        """
+        if not results:
+            return []
+        mode = cls._answer_mode(question)
+        intent = cls._question_intent(question)
+        final_scores = cls._minmax(
+            [float(item.get("final_score", item.get("rerank_score", 0.0))) for item in results]
+        )
+        category_weight = {
+            "implementation": 5.0,
+            "interface": 4.0,
+            "configuration": 3.0,
+            "documentation": 2.0,
+            "test": 0.0,
+        }
+
+        ranked = []
+        for index, item in enumerate(results):
+            enriched = dict(item)
+            category = cls._source_category(item)
+            score = 2.0 * final_scores[index] + category_weight[category]
+            if mode == "configuration" and category == "configuration":
+                score += 5.0
+            if mode == "architecture" and category in {"implementation", "interface"}:
+                score += 0.8
+            if mode == "debugging" and category == "implementation":
+                score += 1.0
+            if intent == "tests" and category == "test":
+                score += 6.0
+            if item.get("symbol_type") not in {"fallback_chunk", "file_overview", "module"}:
+                score += 0.5
+            if snippets and category in {"documentation", "test"}:
+                score -= 1.5
+            enriched["answer_rank_score"] = round(score, 6)
+            ranked.append(enriched)
+
+        ranked.sort(
+            key=lambda item: (
+                float(item.get("answer_rank_score", 0.0)),
+                float(item.get("final_score", 0.0)),
+            ),
+            reverse=True,
+        )
+        return ranked
+
+    @staticmethod
+    def _is_test_source(item: dict) -> bool:
+        path = (item.get("file_path") or "").lower()
+        basename = path.rsplit("/", 1)[-1]
+        return (
+            path.startswith(("tests/", "test/", "spec/", "__tests__/"))
+            or "/tests/" in path
+            or "/test/" in path
+            or "/__tests__/" in path
+            or basename.startswith("test_")
+            or basename.endswith("_test.py")
+            or ".test." in basename
+            or ".spec." in basename
+        )
+
+    @staticmethod
+    def _source_category(item: dict) -> str:
+        path = (item.get("file_path") or "").lower()
+        basename = path.rsplit("/", 1)[-1]
+        symbol_type = (item.get("symbol_type") or "").lower()
+        if CodebaseRAGSystem._is_test_source(item):
+            return "test"
+
+        config_names = {
+            ".env",
+            ".env.example",
+            "dockerfile",
+            "package.json",
+            "pyproject.toml",
+            "requirements.txt",
+            "setup.cfg",
+            "tox.ini",
+            "tsconfig.json",
+            "vercel.json",
+        }
+        config_extensions = (".toml", ".yaml", ".yml", ".ini", ".cfg", ".properties")
+        if (
+            basename in config_names
+            or basename.endswith(config_extensions)
+            or basename.startswith(("config.", "settings."))
+            or any(token in path for token in {"/config/", "/configs/"})
+        ):
+            return "configuration"
+        if (
+            basename.startswith("readme")
+            or basename.endswith((".md", ".mdx", ".rst"))
+            or path.startswith(("docs/", "documentation/"))
+            or "/docs/" in path
+        ):
+            return "documentation"
+        if (
+            "interface" in symbol_type
+            or "type_alias" in symbol_type
+            or basename.endswith((".d.ts", ".h", ".hpp", ".proto", ".graphql"))
+            or any(token in path for token in {"/interfaces/", "/types/", "/schemas/"})
+        ):
+            return "interface"
+        return "implementation"
 
     @staticmethod
     def _is_documentation_query(query: str) -> bool:
