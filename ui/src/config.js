@@ -14,7 +14,6 @@ export function getSessionId() {
   if (!value) {
     value = window.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
     window.sessionStorage.setItem(SESSION_STORAGE_KEY, value);
-    console.log("Created session id:", value);
   }
   return value;
 }

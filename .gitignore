@@ -1,1 +1,33 @@
-documenso/
+# Environment and local tooling
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+.DS_Store
+.idea/
+.vscode/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Runtime and evaluation artifacts
+*.db
+*.log
+server/data/
+server/evals/results/
+
+# Frontend
+ui/node_modules/
+ui/build/
+ui/coverage/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*

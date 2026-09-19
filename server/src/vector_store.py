@@ -380,22 +380,10 @@ class QdrantVectorStore:
         if self.embedding_dim > 0:
             self._ensure_collection()
 
-    def save(self):
-        # Qdrant persists successful writes server-side.
-        return None
-
     def close(self):
         close = getattr(self.client, "close", None)
         if close:
             close()
-
-    def load(self):
-        self._ensure_collection()
-
-    def keep_alive(self) -> dict:
-        if self.client.collection_exists(collection_name=self.collection_name):
-            self.client.get_collection(collection_name=self.collection_name)
-        return self.get_stats()
 
     def get_stats(self) -> dict:
         if not self.client.collection_exists(collection_name=self.collection_name):

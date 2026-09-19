@@ -550,52 +550,90 @@ function WorkspaceScreen({
 function AnswerBlock({ answer }) {
   const snippets = answer.implementation_snippets || [];
   const relatedFiles = answer.related_files || [];
+  const sections =
+    Array.isArray(answer.answer_sections) && answer.answer_sections.length > 0
+      ? answer.answer_sections
+      : [
+          {
+            key: "answer",
+            title: "Answer",
+            type: "markdown",
+            content: answer.direct_answer || answer.answer,
+          },
+          {
+            key: "relevant_implementation",
+            title: "Relevant implementation",
+            type: "snippets",
+            items: snippets,
+          },
+          {
+            key: "why_this_code_matters",
+            title: "Why this code matters",
+            type: "markdown",
+            content: answer.why_this_code_matters,
+          },
+          {
+            key: "related_files",
+            title: "Related files",
+            type: "files",
+            items: relatedFiles,
+          },
+        ];
 
   return (
     <div className="space-y-7 text-sm leading-7 text-zinc-100">
-      <AnswerSection eyebrow="Answer">
-        <MarkdownAnswer value={answer.direct_answer || answer.answer} />
-      </AnswerSection>
-
-      {snippets.length > 0 ? (
-        <AnswerSection eyebrow="Relevant implementation">
-          <div className="space-y-4">
-            {snippets.map((snippet, index) => (
-              <ImplementationSnippet
-                key={`${snippet.file_path}-${snippet.line_start}-${index}`}
-                snippet={snippet}
-              />
-            ))}
-          </div>
-        </AnswerSection>
-      ) : null}
-
-      {answer.why_this_code_matters ? (
-        <AnswerSection eyebrow="Why this code matters">
-          <MarkdownAnswer value={answer.why_this_code_matters} />
-        </AnswerSection>
-      ) : null}
-
-      {relatedFiles.length > 0 ? (
-        <AnswerSection eyebrow="Related files">
-          <div className="overflow-hidden rounded-2xl border border-white/10 bg-black/20">
-            {relatedFiles.map((file, index) => (
-              <div
-                key={`${file.file_path}-${index}`}
-                className="flex gap-3 border-b border-white/10 px-4 py-3 last:border-b-0"
-              >
-                <Files className="mt-1 h-4 w-4 shrink-0 text-zinc-500" strokeWidth={1.8} />
-                <div className="min-w-0">
-                  <p className="break-all font-mono text-xs font-medium leading-6 text-zinc-100">
-                    {file.file_path}
-                  </p>
-                  <p className="text-xs leading-5 text-zinc-400">{file.description}</p>
-                </div>
+      {sections.map((section, sectionIndex) => {
+        const items = section.items || [];
+        if (section.type === "snippets") {
+          if (items.length === 0) return null;
+          return (
+            <AnswerSection eyebrow={section.title} key={section.key || sectionIndex}>
+              <div className="space-y-4">
+                {items.map((snippet, index) => (
+                  <ImplementationSnippet
+                    key={`${snippet.file_path}-${snippet.line_start}-${index}`}
+                    snippet={snippet}
+                  />
+                ))}
               </div>
-            ))}
-          </div>
-        </AnswerSection>
-      ) : null}
+            </AnswerSection>
+          );
+        }
+
+        if (section.type === "files") {
+          if (items.length === 0) return null;
+          return (
+            <AnswerSection eyebrow={section.title} key={section.key || sectionIndex}>
+              <div className="overflow-hidden rounded-2xl border border-white/10 bg-black/20">
+                {items.map((file, index) => (
+                  <div
+                    key={`${file.file_path}-${index}`}
+                    className="flex gap-3 border-b border-white/10 px-4 py-3 last:border-b-0"
+                  >
+                    <Files
+                      className="mt-1 h-4 w-4 shrink-0 text-zinc-500"
+                      strokeWidth={1.8}
+                    />
+                    <div className="min-w-0">
+                      <p className="break-all font-mono text-xs font-medium leading-6 text-zinc-100">
+                        {file.file_path}
+                      </p>
+                      <p className="text-xs leading-5 text-zinc-400">{file.description}</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </AnswerSection>
+          );
+        }
+
+        if (!section.content) return null;
+        return (
+          <AnswerSection eyebrow={section.title} key={section.key || sectionIndex}>
+            <MarkdownAnswer value={section.content} />
+          </AnswerSection>
+        );
+      })}
     </div>
   );
 }
@@ -846,9 +884,7 @@ function renderInlineMarkdown(text) {
 }
 
 function CitationRail({ answer, repo }) {
-  const sources = [...(answer.sources || [])].sort(
-    (left, right) => getConfidencePercentValue(right) - getConfidencePercentValue(left),
-  );
+  const sources = answer.sources || [];
 
   return (
     <div className="space-y-4">
@@ -875,10 +911,6 @@ function CitationRail({ answer, repo }) {
               Lines: {source.line_start}–{source.line_end}
             </span>
           </div>
-          {/* {source.signature && <p className="mt-4 text-xs leading-6 text-zinc-500">{source.signature}</p>} */}
-          <p className="mt-auto pt-4 text-right text-[11px] leading-5 text-zinc-400">
-            Confidence: {formatConfidencePercent(source)}
-          </p>
         </article>
       ))}
     </div>
@@ -899,27 +931,6 @@ function formatRepoError(errorMessage) {
   }
 
   return errorMessage;
-}
-
-function formatConfidencePercent(source) {
-  const percent = getConfidencePercentValue(source);
-  return `${percent}%`;
-}
-
-function getConfidencePercentValue(source) {
-  const semantic = source?.semantic_score;
-  if (typeof semantic === "number" && semantic > 0) {
-    return Math.max(8, Math.min(99, Math.round(semantic * 100)));
-  }
-
-  const rerank = source?.rerank_score;
-  if (typeof rerank === "number") {
-    // Soften raw cross-encoder scores into a demo-friendly percentage range.
-    const normalized = 1 / (1 + Math.exp(-(rerank / 4)));
-    return Math.max(8, Math.min(99, Math.round(normalized * 100)));
-  }
-
-  return 0;
 }
 
 const APP_BACKGROUND_STYLE = {

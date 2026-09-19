@@ -10,6 +10,7 @@ from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Qu
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, HttpUrl, ValidationError
 
+from src import __version__
 from src.app_logging import RequestIdMiddleware, configure_logging, fields, get_logger
 from src.config import Settings
 from src.rag_system import CodebaseRAGSystem
@@ -68,9 +69,9 @@ async def lifespan(application: FastAPI):
 def create_app() -> FastAPI:
     settings = Settings.from_env(require_external_services=False)
     application = FastAPI(
-        title="Codebase RAG API",
+        title="Code Compass API",
         description="Index GitHub repositories and answer questions with grounded citations.",
-        version="2.1.0",
+        version=__version__,
         lifespan=lifespan,
     )
     application.state.ready = False
@@ -106,7 +107,7 @@ def require_session_id(x_session_id: Optional[str] = Header(None, alias="X-Sessi
 
 @app.get("/")
 async def root():
-    return {"status": "online", "message": "Codebase RAG API is running"}
+    return {"status": "online", "message": "Code Compass API is running"}
 
 
 def _health(request: Request):

@@ -70,6 +70,38 @@ class RetrievalModelTests(unittest.TestCase):
         self.assertGreater(scores[0], scores[1])
         self.assertTrue(RERANK_SUFFIX.endswith("</think>\n\n"))
 
+    def test_reranker_uses_fast_batch_tokenization_and_preserves_suffix(self):
+        class FakeTokenizer:
+            pad_token_id = 0
+
+            def __init__(self):
+                self.call_kwargs = None
+
+            def __call__(self, texts, **kwargs):
+                self.call_kwargs = kwargs
+                return {
+                    "input_ids": torch.tensor([[0, 11, 12], [21, 22, 23]]),
+                    "attention_mask": torch.tensor([[0, 1, 1], [1, 1, 1]]),
+                }
+
+        engine = HybridSearchEngine.__new__(HybridSearchEngine)
+        engine.device = "cpu"
+        engine.reranker_tokenizer = FakeTokenizer()
+        engine._prefix_token_ids = [1, 2]
+        engine._suffix_token_ids = [3, 4]
+
+        inputs = engine._prepare_rerank_inputs("query", ["short", "longer"])
+
+        self.assertTrue(engine.reranker_tokenizer.call_kwargs["padding"])
+        self.assertEqual(
+            inputs["input_ids"].tolist(),
+            [[0, 1, 2, 11, 12, 3, 4], [1, 2, 21, 22, 23, 3, 4]],
+        )
+        self.assertEqual(
+            inputs["attention_mask"].tolist(),
+            [[0, 1, 1, 1, 1, 1, 1], [1, 1, 1, 1, 1, 1, 1]],
+        )
+
 
 class RetrievalPipelineTests(unittest.TestCase):
     def test_translated_document_families_do_not_flood_candidates(self):
@@ -86,6 +118,53 @@ class RetrievalPipelineTests(unittest.TestCase):
             "How does an incoming HTTP request reach a view and become a response?"
         )
         self.assertEqual(intent, "cross_file")
+
+    def test_flow_shape_takes_priority_over_specific_subject_intents(self):
+        questions = [
+            "How do invalid requests flow through validation and error handling?",
+            "How is the authentication flow tested across middleware and handlers?",
+            "What is the execution flow from an API endpoint to a background job?",
+            "Explain the application lifecycle from configuration through startup.",
+            (
+                "How is the authentication architecture divided between middleware "
+                "and handlers?"
+            ),
+        ]
+
+        for question in questions:
+            with self.subTest(question=question):
+                self.assertEqual(
+                    CodebaseRAGSystem._question_intent(question),
+                    "cross_file",
+                )
+
+    def test_state_transformation_question_is_cross_file_without_flow_keyword(self):
+        questions = [
+            "How does a parsed command become an executed job?",
+            "How does FastAPI turn validation failures and raised exceptions into HTTP responses?",
+        ]
+
+        for question in questions:
+            with self.subTest(question=question):
+                self.assertEqual(
+                    CodebaseRAGSystem._question_intent(question),
+                    "cross_file",
+                )
+
+    def test_specific_intents_remain_when_no_cross_file_shape_is_requested(self):
+        cases = {
+            "Which error is raised for an invalid token?": "error_handling",
+            "Where are authentication tests located?": "tests",
+            "Where is the public API router implemented?": "api",
+            "Where is the request handler method implemented?": "implementation",
+        }
+
+        for question, expected_intent in cases.items():
+            with self.subTest(question=question):
+                self.assertEqual(
+                    CodebaseRAGSystem._question_intent(question),
+                    expected_intent,
+                )
 
     def test_stage_metric_preserves_original_rank(self):
         debug = [

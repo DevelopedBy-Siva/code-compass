@@ -168,11 +168,11 @@ class ConversationPlanningTests(unittest.TestCase):
 
 
 class AnswerExperienceTests(unittest.TestCase):
-    def test_prompt_requires_layered_repository_answer(self):
+    def test_prompt_and_response_use_implementation_presentation(self):
         system = CodebaseRAGSystem.__new__(CodebaseRAGSystem)
         system.llm_model = "test-model"
         system.indexing_progress = {}
-        layered_answer = """## Answer
+        presented_answer = """## Explanation
 The request enters the API handler and is passed to the service. [1]
 
 ## Relevant implementation
@@ -180,11 +180,8 @@ The request enters the API handler and is passed to the service. [1]
 
 ## Why this code matters
 This function owns the handoff from HTTP input to the service layer. [1]
-
-## Related files
-- `app.py` — Receives the request and invokes the service. [1]
 """
-        system.llm_client = _FakeBedrock([layered_answer])
+        system.llm_client = _FakeBedrock([presented_answer])
         trace = {}
         source = {
             "file_path": "app.py",
@@ -203,28 +200,124 @@ This function owns the handoff from HTTP input to the service layer. [1]
 
         result = system._generate_answer(
             _repository(),
-            "Give me a repository overview",
+            "Where is handle_request implemented?",
             [source],
-            rewritten_query="Give me a repository overview",
+            rewritten_query="Where is handle_request implemented?",
             trace=trace,
         )
 
         self.assertEqual(result["answer"], result["direct_answer"])
+        self.assertEqual(result["answer_mode"], "implementation")
         self.assertIn("request enters the API handler", result["direct_answer"])
         self.assertIn("owns the handoff", result["why_this_code_matters"])
         self.assertEqual(result["implementation_snippets"][0]["file_path"], "app.py")
         self.assertEqual(result["related_files"][0]["file_path"], "app.py")
+        self.assertEqual(
+            [section["title"] for section in result["answer_sections"]],
+            ["Explanation", "Relevant implementation", "Why this code matters"],
+        )
         self.assertIn("## Relevant implementation", trace["final_prompt"])
+        self.assertNotIn("## Related files", trace["final_prompt"])
         self.assertIn("Standalone interpretation", trace["final_prompt"])
+        self.assertIn("def handle_request(request):", trace["generation_context"])
+        self.assertEqual(
+            trace["generation_context_stats"]["total_content_budget"],
+            1500,
+        )
 
-    def test_layered_answer_validator_rejects_missing_section(self):
-        incomplete = """## Answer
-Direct answer.
+    def test_each_answer_mode_has_its_own_section_order(self):
+        expected = {
+            "architecture": ["Execution flow", "Components involved", "Related files"],
+            "implementation": [
+                "Explanation",
+                "Relevant implementation",
+                "Why this code matters",
+            ],
+            "configuration": ["Configuration", "Files", "Runtime impact"],
+            "debugging": ["Root cause", "Evidence", "Relevant implementation"],
+        }
 
-## Relevant implementation
-[IMPLEMENTATION_SNIPPETS]
+        for mode, titles in expected.items():
+            with self.subTest(mode=mode):
+                specs = CodebaseRAGSystem._answer_section_specs(mode)
+                self.assertEqual([spec["title"] for spec in specs], titles)
+                prompt = CodebaseRAGSystem._answer_structure_instructions(mode)
+                for title in titles:
+                    self.assertIn(f"## {title}", prompt)
+
+    def test_answer_mode_matches_the_question_shape(self):
+        cases = {
+            "How do invalid requests flow through validation?": "architecture",
+            "How is the timeout configured?": "configuration",
+            "Why does token validation keep failing?": "debugging",
+            "Where is the request handler implemented?": "implementation",
+        }
+
+        for question, expected_mode in cases.items():
+            with self.subTest(question=question):
+                self.assertEqual(
+                    CodebaseRAGSystem._answer_mode(question),
+                    expected_mode,
+                )
+
+    def test_answer_validator_uses_mode_specific_sections(self):
+        architecture_answer = """## Execution flow
+The request reaches the handler. [1]
+
+## Components involved
+The router and handler participate. [1]
+
+## Related files
+- `app.py` — Receives the request. [1]
 """
-        self.assertFalse(CodebaseRAGSystem._has_layered_answer(incomplete))
+        self.assertTrue(
+            CodebaseRAGSystem._has_answer_structure(
+                architecture_answer,
+                "architecture",
+            )
+        )
+        self.assertFalse(
+            CodebaseRAGSystem._has_answer_structure(
+                architecture_answer,
+                "implementation",
+            )
+        )
+
+    def test_configuration_answer_parses_files_and_runtime_impact(self):
+        source = {
+            "file_path": "src/settings.py",
+            "symbol_name": "REQUEST_TIMEOUT",
+            "symbol_type": "assignment",
+        }
+        answer = """## Configuration
+`REQUEST_TIMEOUT` controls the request deadline. [1]
+
+## Files
+- `src/settings.py` — Defines the timeout value. [1]
+
+## Runtime impact
+The value changes how long a request may run before timing out. [1]
+"""
+
+        parsed = CodebaseRAGSystem._parse_presented_answer(
+            answer,
+            [source],
+            question="How is the request timeout configured?",
+            answer_mode="configuration",
+        )
+
+        self.assertEqual(
+            [section["type"] for section in parsed["answer_sections"]],
+            ["markdown", "files", "markdown"],
+        )
+        self.assertEqual(
+            parsed["answer_sections"][1]["items"][0]["file_path"],
+            "src/settings.py",
+        )
+        self.assertIn(
+            "how long a request may run",
+            parsed["answer_sections"][2]["content"],
+        )
 
     def test_snippet_is_centered_and_never_exceeds_twenty_lines(self):
         content = "\n".join(f"line {index}" for index in range(1, 51))

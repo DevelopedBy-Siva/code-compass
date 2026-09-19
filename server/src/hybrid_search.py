@@ -70,7 +70,7 @@ class HybridSearchEngine:
         self.reranker = AutoModelForCausalLM.from_pretrained(
             self.reranker_model_name,
             trust_remote_code=True,
-            torch_dtype=torch.float16 if self.device == "cuda" else torch.float32,
+            dtype=torch.float16 if self.device == "cuda" else torch.float32,
         ).to(self.device)
         self.reranker.config.pad_token_id = self.reranker_tokenizer.pad_token_id
         self.reranker.eval()
@@ -222,22 +222,41 @@ class HybridSearchEngine:
         )
         encoded = self.reranker_tokenizer(
             pairs,
-            padding=False,
+            padding=True,
             truncation=True,
             max_length=content_limit,
             add_special_tokens=False,
-            return_attention_mask=False,
-        )
-        encoded["input_ids"] = [
-            self._prefix_token_ids + token_ids + self._suffix_token_ids
-            for token_ids in encoded["input_ids"]
-        ]
-        inputs = self.reranker_tokenizer.pad(
-            encoded,
-            padding=True,
+            return_attention_mask=True,
             return_tensors="pt",
         )
-        return inputs.to(self.device)
+
+        # Keep the fixed classifier prompt outside content truncation so the
+        # final token always asks the model for its yes/no answer. Rebuild the
+        # already padded batch with left padding around the complete sequence.
+        batch_size, content_width = encoded["input_ids"].shape
+        prefix = torch.tensor(self._prefix_token_ids, dtype=torch.long)
+        suffix = torch.tensor(self._suffix_token_ids, dtype=torch.long)
+        sequence_width = len(prefix) + content_width + len(suffix)
+        input_ids = torch.full(
+            (batch_size, sequence_width),
+            self.reranker_tokenizer.pad_token_id,
+            dtype=torch.long,
+        )
+        attention_mask = torch.zeros_like(input_ids)
+
+        for row in range(batch_size):
+            content_ids = encoded["input_ids"][row][
+                encoded["attention_mask"][row].bool()
+            ]
+            sequence = torch.cat((prefix, content_ids, suffix))
+            offset = sequence_width - len(sequence)
+            input_ids[row, offset:] = sequence
+            attention_mask[row, offset:] = 1
+
+        return {
+            "input_ids": input_ids.to(self.device),
+            "attention_mask": attention_mask.to(self.device),
+        }
 
     @staticmethod
     def _format_rerank_pair(query: str, document: str) -> str:

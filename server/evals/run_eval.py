@@ -194,20 +194,24 @@ def keyword_hits(answer: str, keywords):
     return matched, len(keywords)
 
 
-def judge_faithfulness(rag_system, question: str, answer: str, sources: list):
-    if not ENABLE_FAITHFULNESS or not answer.strip() or not sources:
+def judge_faithfulness(
+    rag_system,
+    question: str,
+    answer: str,
+    generation_context: str,
+):
+    if not ENABLE_FAITHFULNESS or not answer.strip() or not generation_context.strip():
         return None
-    context = "\n\n".join(
-        f"[{i}] {source['file_path']}\n{source['snippet'][:1500]}"
-        for i, source in enumerate(sources, start=1)
-    )
     system_prompt = (
         "You are a strict grading assistant. Given a question, retrieved code context, and a "
         "generated answer, output ONLY a single number between 0 and 1 for how faithful the "
         "answer is to the context (1.0 = every claim is supported, 0.0 = the answer invents or "
         "contradicts facts not in the context). Output just the number."
     )
-    user_prompt = f"Question: {question}\n\nContext:\n{context}\n\nAnswer:\n{answer}\n\nFaithfulness score:"
+    user_prompt = (
+        f"Question: {question}\n\nContext:\n{generation_context}\n\n"
+        f"Answer:\n{answer}\n\nFaithfulness score:"
+    )
     try:
         text, _ = rag_system._generate_markdown_response(system_prompt, user_prompt)
         match = re.search(r"(\d(?:\.\d+)?)", text)
@@ -349,7 +353,16 @@ def run_case(rag_system, repo_id: int, repo_name: str, case: dict):
         "expected_source_grounded": int(expected_source_grounded),
         "grounded": int(expected_source_grounded),
         "retrieval_debug": retrieval_debug,
-        "faithfulness": judge_faithfulness(rag_system, case["question"], result.get("answer", ""), sources),
+        "generation_context_stats": result.get("conversation_trace", {}).get(
+            "generation_context_stats",
+            {},
+        ),
+        "faithfulness": judge_faithfulness(
+            rag_system,
+            case["question"],
+            result.get("answer", ""),
+            result.get("conversation_trace", {}).get("generation_context", ""),
+        ),
         "latency_ms": round(elapsed_ms, 1),
     }
 

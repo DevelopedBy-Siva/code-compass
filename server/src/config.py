@@ -81,7 +81,7 @@ class Settings:
             raise RuntimeError("CORS_ORIGINS must contain at least one origin")
 
         return cls(
-            app_env=os.getenv("APP_ENV", os.getenv("ENVIRONMENT", "local")).lower(),
+            app_env=os.getenv("APP_ENV", "local").lower(),
             aws_region=region,
             bedrock_model_id=os.getenv(
                 "BEDROCK_MODEL_ID", "qwen.qwen3-coder-next"

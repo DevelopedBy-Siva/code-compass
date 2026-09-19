@@ -1,6 +1,6 @@
 # Code Compass: Operations and Deployment
 
-This document holds the operational detail intentionally kept out of the portfolio-focused root README: evaluation, API usage, runtime configuration, the SageMaker serving contract, AWS resources and IAM, deployment workflows, and production tradeoffs.
+This document covers evaluation, API usage, runtime configuration, the SageMaker serving contract, AWS resources and IAM, deployment workflows, and operational constraints.
 
 ## Retrieval and conversation details
 
@@ -10,40 +10,13 @@ Qdrant is both the vector store and persistent repository cache. A canonical rep
 
 Each question uses Qwen3 semantic retrieval, BM25, path and intent signals, and Reciprocal Rank Fusion. Controlled over-fetching precedes deduplication so repeated chunks and translated documentation cannot consume the candidate budget. Qwen3-Reranker-0.6B scores candidates with its native `yes`/`no` relevance format; final selection combines semantic, lexical, path, reranker, canonical-source, and diversity signals.
 
-Before retrieval, the conversation layer routes social messages, rewrites contextual follow-ups into standalone repository questions, and asks for clarification when a reference has no reliable antecedent. A `conversation_trace` records the original query, standalone rewrite, retrieval query, route, and final Bedrock prompt. The answer prompt requires concrete files and symbols, evidence/inference separation, inline citations, and an explicit acknowledgement when evidence is insufficient. Citation numbers are validated before the response is returned.
-
-Repository-overview answers use consistent **Purpose**, **Architecture**, **Technologies**, **Main components**, and **Request flow** sections.
+Before retrieval, the conversation layer routes social messages, rewrites contextual follow-ups into standalone repository questions, and asks for clarification when a reference has no reliable antecedent. Debug responses can include a `conversation_trace` with the original query, standalone rewrite, retrieval query, and final Bedrock prompt. The answer prompt requires concrete files and symbols, evidence/inference separation, inline citations, and an explicit acknowledgement when evidence is insufficient. Citation numbers are validated before the response is returned.
 
 ## Evaluation
 
 The suite contains 24 hand-written questions—eight each for Documenso, FastAPI, and Django—and covers repository purpose, implementation lookup, API behavior, configuration, tests, error handling, security, cross-file flows, and conversational follow-ups.
 
-Reported metrics include candidate, semantic, lexical, fused, and path hit rates; reranker and prioritized Top-K hit rates; final-context retrieval hit rate; Top-1 hit rate; Mean Reciprocal Rank; expected-source grounded-answer rate; and optional LLM-judged faithfulness.
-
-The optimized 0.6B run reached 91.67% final-context retrieval, 70.83% Top-1, 0.813 MRR, 100% candidate recall, and 99.17% LLM-judged faithfulness. All 24 answers were judged: 23 scored 1.0 and one scored 0.8. Because the same Bedrock model generates and judges answers, faithfulness is a regression signal rather than an independent evaluation.
-
-| Repository | Final-context retrieval | Top-1 | MRR |
-|---|---:|---:|---:|
-| Documenso | 87.5% | 75.0% | 0.813 |
-| FastAPI | 87.5% | 62.5% | 0.750 |
-| Django | 100% | 75.0% | 0.875 |
-
-The expected-source grounded-answer rate moved from 58.33% to 91.67%, matching the final-context improvement.
-
-The two remaining misses are Documenso's signing-package implementation and FastAPI's OpenAPI generation. In both cases, the expected source enters the candidate set but falls outside the final eight sources, pointing to final retrieval prioritization rather than answer-model fine-tuning.
-
-The changes responsible for the measured improvement were:
-
-- Qwen3 last-token pooling instead of incorrect mean pooling;
-- task instructions on query embeddings while document embeddings remain unprefixed;
-- the native reranker prompt and relevance-token scoring;
-- GPU-batched reranking and controlled candidate over-fetching;
-- deduplication of localized documentation and repeated chunks;
-- lower influence for noisy path-only matches;
-- stronger cross-file question classification and test-source penalties;
-- removal of an early top-eight truncation;
-- correct Unicode byte offsets in tree-sitter extraction;
-- stage-level metrics for candidate generation, fusion, reranking, and final selection.
+Reported metrics include candidate, semantic, lexical, fused, and path hit rates; reranker and prioritized Top-K hit rates; final-context retrieval hit rate; Top-1 hit rate; Mean Reciprocal Rank; expected-source grounded-answer rate; and optional LLM-judged faithfulness. Because the same Bedrock model generates and judges answers, faithfulness is a regression signal rather than an independent evaluation.
 
 Run the complete evaluation from the repository root:
 
@@ -82,7 +55,7 @@ Index a repository, reusing its cache by default:
 ```bash
 curl -X POST http://localhost:8000/api/repos/index \
   -H 'Content-Type: application/json' \
-  -H 'X-Session-Id: portfolio-demo-session' \
+  -H 'X-Session-Id: code-compass-demo-session' \
   -d '{
     "github_url": "https://github.com/fastapi/fastapi",
     "reindex": false
@@ -96,7 +69,7 @@ Query the completed index:
 ```bash
 curl -X POST http://localhost:8000/api/query \
   -H 'Content-Type: application/json' \
-  -H 'X-Session-Id: portfolio-demo-session' \
+  -H 'X-Session-Id: code-compass-demo-session' \
   -d '{
     "repo_id": 1,
     "question": "Where is request validation handled?",
@@ -154,7 +127,7 @@ SageMaker real-time endpoint (one GPU instance, one FastAPI worker)
 GitHub Actions (OIDC) ── build/test ──► ECR ──► SageMaker deployment
 ```
 
-SageMaker endpoints are AWS APIs, not public general-purpose web servers. `ui/api/[...path].js` maps browser REST calls to `/invocations`, uses Vercel OIDC, and never sends AWS credentials to the browser. Direct `/api/*` routes remain available locally.
+SageMaker endpoints are AWS APIs, not public general-purpose web servers. `ui/api/proxy.js` maps browser REST calls to `/invocations`, uses Vercel OIDC, and never sends AWS credentials to the browser. Direct `/api/*` routes remain available locally.
 
 The container listens on `0.0.0.0:8080`, responds to `/ping`, accepts `/invocations`, handles SageMaker's `serve` argument, and exits cleanly on `SIGTERM`. It reports healthy only after both local models and Qdrant are ready.
 
@@ -215,7 +188,7 @@ Old models and endpoint configurations are retained for rollback; delete unused 
 
 ## GitHub Actions CI/CD
 
-`.github/workflows/deploy-sagemaker.yml` runs on backend or deployment changes to `main`. It installs dependencies, runs tests, assumes the deployment role, validates the local SageMaker contract, pushes the verified image, and updates the endpoint. It requests `id-token: write` and uses GitHub OIDC; no AWS access keys are stored.
+`.github/workflows/deploy-sagemaker.yml` runs unit and container-parity validation on every push and pull request. Main-branch pushes and manual runs also push the verified image and deploy it to SageMaker. Deployment jobs request `id-token: write` and use GitHub OIDC; no AWS access keys are stored.
 
 Create a protected GitHub environment named `production` with these secrets:
 
@@ -234,7 +207,7 @@ Create a protected GitHub environment named `production` with these secrets:
 
 All values use GitHub's `secrets` context. Environment protection and required reviewers are recommended.
 
-The direct Qdrant key is convenient for a portfolio environment, but places it in the SageMaker model's container environment. AWS advises against sensitive values in `CreateModel` environment fields. For shared or long-lived deployments, set `QDRANT_API_KEY_SECRET_ARN`; the container retrieves it on startup and the execution role must allow `secretsmanager:GetSecretValue` on that ARN.
+The direct Qdrant key is convenient for a personal deployment, but places it in the SageMaker model's container environment. AWS advises against sensitive values in `CreateModel` environment fields. For shared or long-lived deployments, set `QDRANT_API_KEY_SECRET_ARN`; the container retrieves it on startup and the execution role must allow `secretsmanager:GetSecretValue` on that ARN.
 
 For Vercel, set `AWS_ROLE_ARN`, `SAGEMAKER_AWS_REGION`, and `SAGEMAKER_ENDPOINT_NAME`. Enable OIDC and configure the trust policy. Leave `REACT_APP_API_URL` unset in production so the UI uses the same-origin adapter; set it to `http://localhost:8000` locally.
 
@@ -250,32 +223,25 @@ code-compass/
 │   ├── src/                      # Parsing, retrieval, storage, orchestration
 │   └── tests/                    # Retrieval and deployment regressions
 ├── ui/
-│   ├── api/[...path].js          # OIDC SageMaker invocation adapter
+│   ├── api/proxy.js              # OIDC SageMaker invocation adapter
 │   └── src/                      # React application
 ├── scripts/                      # Build, test, push, and deployment scripts
 ├── .github/workflows/            # OIDC CI/CD workflow
-└── images/                       # Portfolio assets
+└── images/                       # Release screenshots
 ```
 
-## Production engineering review
-
-- **State and scaling:** repository/session metadata and BM25 indexes are process-local. The endpoint deliberately uses one worker and should begin with one instance. Move state to a shared store before multiple workers or autoscaling.
-- **Long-running indexing:** indexing is an in-process background task after the first invocation returns. Deployment or instance failure interrupts it; a durable queue and worker is the next step.
-- **Request duration:** real-time invocations have a 60-second response window. Keep generation within it or use async inference/a job service.
-- **Security and abuse:** public URLs and bearer-like session IDs are not authentication. Add rate limits, bot controls, repository-size validation, and per-user quotas before broad public access. Never expose Qdrant or AWS credentials to the browser.
-- **Network egress:** GitHub cloning, Qdrant, and Bedrock require egress. A VPC deployment needs NAT or suitable endpoints and security-group rules. Baked models remove Hugging Face as a runtime dependency.
-- **Supply chain:** most Python dependencies are version-bounded rather than hash-locked. Pin model revisions, generate a hashed lock file and SBOM, sign images, and enforce ECR scan findings for higher assurance.
-- **Frontend dependencies:** Create React App is legacy, and `npm audit` reports transitive findings in that tree. Plan a focused migration instead of applying a breaking `npm audit fix --force` during deployment work.
-- **Observability:** CloudWatch receives container output. Add latency/error metrics, alarms, and Qdrant/Bedrock dashboards before treating the service as operationally mature.
-- **Cost:** a GPU endpoint accrues charges while `InService`; Qdrant, Bedrock, ECR, CloudWatch, NAT, and Vercel add costs. Delete idle endpoints, apply lifecycle policies, and configure AWS Budgets alerts. Serverless inference is not a direct fit for this model size and startup profile.
-
-## Current limitations
+## Operational constraints
 
 - Only public GitHub repositories are supported.
 - Repository metadata, active sessions, and lexical indexes are process-local.
+- Indexing runs as an in-process background task and is interrupted by deployment or instance failure.
+- Real-time invocations have a 60-second response window.
+- Session IDs scope data but are not user authentication.
+- GitHub cloning, Qdrant, and Bedrock require network egress.
 - Large repositories take time to parse and embed.
 - Both local models benefit substantially from CUDA acceleration.
 - Model-based reranking is the largest retrieval-time cost.
 - The system does not build a call graph or dependency graph.
-- The regression suite needs broader repository and language coverage.
-- Two of 24 cases retrieve the expected candidate but miss it in final ranking.
+- The Python dependency file is version-pinned but not hash-locked.
+- Create React App contributes known transitive `npm audit` findings.
+- A GPU endpoint accrues charges while it remains `InService`.
