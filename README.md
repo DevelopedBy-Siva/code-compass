@@ -63,27 +63,24 @@ The container is based on the official PyTorch CUDA runtime to keep PyTorch, CUD
 ### CI/CD pipeline
 
 ```text
-unit-tests
+Unit Tests
     │
     ▼
-docker-build
-    │
-    ▼
-sagemaker-parity-test
+Build + Parity Test
     │
     └── Pull requests stop after validation
     │
     ▼ main push / manual dispatch
-push-ecr (GitHub OIDC)
+Push ECR (GitHub OIDC)
     │
     ▼
-deploy-sagemaker (wait for InService)
+Deploy SageMaker (wait for InService)
     │
     ▼
-smoke-test (live invocation + failure diagnostics)
+Smoke Test (live invocation + failure diagnostics)
 ```
 
-One workflow exposes six distinct jobs connected by `needs`. Every push and pull request runs through parity validation; ECR publishing and deployment are gated to `main` pushes or manual dispatch. The production image is passed between isolated runners as a short-lived artifact, so the image published to ECR is the one admitted by the validation chain. Deployment uses short-lived GitHub OIDC credentials and succeeds only after SageMaker reaches `InService` and serves a real invocation. Failures automatically print the endpoint description, `FailureReason`, and the last 100 events from the newest CloudWatch log stream. The production deployment role therefore needs `sagemaker:InvokeEndpoint`, `logs:DescribeLogStreams`, and `logs:GetLogEvents` in addition to its existing ECR and SageMaker deployment permissions.
+One workflow exposes five focused jobs connected by `needs`. Every push and pull request runs through unit and parity validation; ECR publishing and deployment are gated to `main` pushes or manual dispatch. The production image stays on one runner while it is built and parity-tested, then the verified image is passed once to the isolated ECR runner as a short-lived artifact. Deployment uses short-lived GitHub OIDC credentials and succeeds only after SageMaker reaches `InService` and serves a real invocation. Failures automatically print the endpoint description, `FailureReason`, and the last 100 events from the newest CloudWatch log stream. The production deployment role therefore needs `sagemaker:InvokeEndpoint`, `logs:DescribeLogStreams`, and `logs:GetLogEvents` in addition to its existing ECR and SageMaker deployment permissions.
 
 Vercel OIDC is unchanged: the same-origin function exchanges its workload identity for a narrowly scoped AWS role and invokes SageMaker without exposing AWS credentials to the browser. No long-lived AWS access keys are used by either deployment path.
 

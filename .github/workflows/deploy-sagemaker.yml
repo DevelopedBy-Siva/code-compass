@@ -18,7 +18,7 @@ env:
 
 jobs:
   unit-tests:
-    name: Unit tests
+    name: Unit Tests
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -42,35 +42,11 @@ jobs:
         working-directory: server
         run: python -m unittest discover -s tests -v
 
-  docker-build:
-    name: Build production image
+  build-and-parity-test:
+    name: Build + Parity Test
     needs: unit-tests
     runs-on: ubuntu-latest
-    timeout-minutes: 60
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Build production Docker image
-        run: ./scripts/build.sh
-
-      - name: Package image for downstream jobs
-        run: docker save "$IMAGE_NAME:$IMAGE_TAG" | zstd -T0 -1 -o /tmp/code-compass-image.tar.zst
-
-      - name: Upload image artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: production-image-${{ github.sha }}
-          path: /tmp/code-compass-image.tar.zst
-          compression-level: 0
-          retention-days: 1
-          if-no-files-found: error
-
-  sagemaker-parity-test:
-    name: SageMaker parity test
-    needs: docker-build
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 90
     env:
       AWS_REGION: us-east-1
       CORS_ORIGINS: http://localhost:3000
@@ -85,14 +61,8 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Download production image
-        uses: actions/download-artifact@v4
-        with:
-          name: production-image-${{ github.sha }}
-          path: /tmp
-
-      - name: Load production image
-        run: zstd -dc /tmp/code-compass-image.tar.zst | docker load
+      - name: Build production Docker image
+        run: ./scripts/build.sh
 
       - name: Configure local parity services
         run: |
@@ -105,9 +75,23 @@ jobs:
       - name: Run local SageMaker compatibility test
         run: ./scripts/test-local-sagemaker.sh
 
+      - name: Package verified image for ECR job
+        if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+        run: docker save "$IMAGE_NAME:$IMAGE_TAG" | zstd -T0 -1 -o /tmp/code-compass-image.tar.zst
+
+      - name: Upload verified image
+        if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: production-image-${{ github.sha }}
+          path: /tmp/code-compass-image.tar.zst
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
+
   push-ecr:
-    name: Push verified image to Amazon ECR
-    needs: sagemaker-parity-test
+    name: Push ECR
+    needs: build-and-parity-test
     if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     permissions:
       contents: read
@@ -141,7 +125,7 @@ jobs:
         run: ./scripts/push.sh
 
   deploy-sagemaker:
-    name: Deploy SageMaker endpoint
+    name: Deploy SageMaker
     needs: push-ecr
     permissions:
       contents: read
@@ -201,7 +185,7 @@ jobs:
           fi
 
   smoke-test:
-    name: Smoke test live endpoint
+    name: Smoke Test
     needs: deploy-sagemaker
     permissions:
       contents: read
