@@ -15,7 +15,7 @@ import tsx from "react-syntax-highlighter/dist/esm/languages/prism/tsx";
 import typescript from "react-syntax-highlighter/dist/esm/languages/prism/typescript";
 import yaml from "react-syntax-highlighter/dist/esm/languages/prism/yaml";
 import { vscDarkPlus } from "react-syntax-highlighter/dist/esm/styles/prism";
-import { ArrowRight, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Code2, Compass, Files, Link2, MapPinned, Plus, Wrench } from "lucide-react";
+import { ArrowRight, ChevronDown, ChevronUp, Code2, Compass, Files, Plus } from "lucide-react";
 import { API_URL, getSessionHeaders, getSessionId, resetSessionId } from "./config";
 
 [
@@ -43,31 +43,17 @@ function App() {
   const [selectedRepoId, setSelectedRepoId] = useState(null);
   const [messages, setMessages] = useState([]);
   const [question, setQuestion] = useState("");
-  const [activeAnswerId, setActiveAnswerId] = useState(null);
   const [indexing, setIndexing] = useState(false);
   const [loadingRepos, setLoadingRepos] = useState(true);
   const [asking, setAsking] = useState(false);
   const [formError, setFormError] = useState("");
   const [stage, setStage] = useState("landing");
-  const [citationsOpen, setCitationsOpen] = useState(true);
   const sessionHeaders = useMemo(() => getSessionHeaders(sessionId), [sessionId]);
 
   const selectedRepo = useMemo(
     () => repos.find((repo) => repo.id === selectedRepoId) || null,
     [repos, selectedRepoId],
   );
-
-  const answerMessages = useMemo(
-    () => messages.filter((message) => message.answerData),
-    [messages],
-  );
-
-  const activeAnswerMessage = useMemo(() => {
-    if (activeAnswerId) {
-      return answerMessages.find((message) => message.id === activeAnswerId) || null;
-    }
-    return answerMessages.at(-1) || null;
-  }, [activeAnswerId, answerMessages]);
 
   const refreshRepos = useCallback(async (preserveSelection = true) => {
     const requestSessionId = sessionId;
@@ -138,7 +124,6 @@ function App() {
     setIndexing(true);
     setFormError("");
     setMessages([]);
-    setActiveAnswerId(null);
 
     try {
       const { data } = await axios.post(
@@ -222,7 +207,6 @@ function App() {
       };
 
       setMessages((current) => [...current, assistantMessage]);
-      setActiveAnswerId(assistantMessage.id);
     } catch (error) {
       setFormError(error?.response?.data?.detail || "Query failed.");
     } finally {
@@ -236,7 +220,6 @@ function App() {
     setRepos([]);
     setSelectedRepoId(null);
     setMessages([]);
-    setActiveAnswerId(null);
     setQuestion("");
     setRepoUrl("");
     setReindex(false);
@@ -249,9 +232,7 @@ function App() {
 
     axios
       .post(`${API_URL}/api/session/end?session_id=${encodeURIComponent(endingSessionId)}`)
-      .catch(() => {
-        // Best effort cleanup of the previous session.
-      });
+      .catch(() => null);
   };
 
   if (stage === "landing") {
@@ -272,17 +253,13 @@ function App() {
 
   return (
     <WorkspaceScreen
-      activeAnswerMessage={activeAnswerMessage}
       asking={asking}
-      citationsOpen={citationsOpen}
       endSession={endSession}
       formError={formError}
       messages={messages}
       question={question}
       selectedRepo={selectedRepo}
       sendQuestion={sendQuestion}
-      setActiveAnswerId={setActiveAnswerId}
-      setCitationsOpen={setCitationsOpen}
       setQuestion={setQuestion}
     />
   );
@@ -387,20 +364,15 @@ function LandingScreen({
 }
 
 function WorkspaceScreen({
-  activeAnswerMessage,
   asking,
-  citationsOpen,
   endSession,
   formError,
   messages,
   question,
   selectedRepo,
   sendQuestion,
-  setActiveAnswerId,
-  setCitationsOpen,
   setQuestion,
 }) {
-  const hasCitations = Boolean(activeAnswerMessage?.answerData?.sources?.length);
   const messagesContainerRef = useRef(null);
 
   useEffect(() => {
@@ -418,12 +390,7 @@ function WorkspaceScreen({
       className="h-screen overflow-hidden text-white"
       style={APP_BACKGROUND_STYLE}
     >
-      <div
-        className={[
-          "grid h-screen grid-cols-1 gap-px overflow-hidden bg-transparent",
-          hasCitations && citationsOpen ? "xl:grid-cols-[minmax(0,1fr)_400px]" : "",
-        ].join(" ")}
-      >
+      <div className="grid h-screen grid-cols-1 overflow-hidden bg-transparent">
         <section className="flex min-h-0 h-screen flex-col overflow-hidden bg-black/45 backdrop-blur-[3px]">
           <div className="flex items-center justify-between border-b border-white/10 px-5 py-4 md:px-8">
             <div>
@@ -441,16 +408,6 @@ function WorkspaceScreen({
                 <Plus className="h-4 w-4" strokeWidth={2.1} />
                 New
               </button>
-              {hasCitations && !citationsOpen ? (
-                <button
-                  className="text-zinc-500 transition hover:text-white"
-                  onClick={() => setCitationsOpen(true)}
-                  type="button"
-                  aria-label="Expand citations"
-                >
-                  <ChevronLeft className="h-5 w-5" strokeWidth={2.1} />
-                </button>
-              ) : null}
             </div>
           </div>
 
@@ -467,22 +424,12 @@ function WorkspaceScreen({
                 <article
                   key={message.id}
                   className={[
-                    "max-w-4xl rounded-[28px] border px-5 py-4",
+                    "rounded-[28px] border px-5 py-4",
                     message.role === "user"
-                      ? "ml-auto border-white/25 bg-white/[0.16] text-white backdrop-blur-xl"
-                      : "border-white/10 bg-white/[0.03] text-white",
+                      ? "ml-auto max-w-[60%] border-white/25 bg-white/[0.16] text-white backdrop-blur-xl"
+                      : "w-full border-white/10 bg-white/[0.03] text-white",
                   ].join(" ")}
-                  onClick={() => {
-                    if (message.answerData) {
-                      setActiveAnswerId(message.id);
-                    }
-                  }}
                 >
-                  {message.role !== "user" ? (
-                    <p className="mb-2 text-[11px] uppercase tracking-[0.24em] text-zinc-500">
-                      {selectedRepo ? `${selectedRepo.owner}/${selectedRepo.name}` : "Repository"}
-                    </p>
-                  ) : null}
                   {message.answerData ? (
                     <AnswerBlock answer={message.answerData} />
                   ) : (
@@ -517,31 +464,6 @@ function WorkspaceScreen({
           </div>
         </section>
 
-        {hasCitations && citationsOpen ? (
-          <aside className="relative flex min-h-0 h-screen flex-col overflow-hidden border-l border-white/10 bg-black/50 backdrop-blur-[3px]">
-            <div className="flex min-h-[69px] items-center border-b border-white/10 px-5 py-4">
-              <div className="flex w-full items-start justify-between gap-3">
-                <div>
-                  <p className="text-sm font-medium uppercase tracking-[0.24em] text-zinc-400">
-                    Citations
-                  </p>
-                </div>
-                <button
-                  className="text-zinc-500 transition hover:text-white"
-                  onClick={() => setCitationsOpen(false)}
-                  type="button"
-                  aria-label="Collapse citations"
-                >
-                  <ChevronRight className="h-5 w-5" strokeWidth={2.1} />
-                </button>
-              </div>
-            </div>
-
-            <div className="scrollbar-thin flex-1 overflow-auto px-5 py-5">
-              <CitationRail answer={activeAnswerMessage.answerData} repo={selectedRepo} />
-            </div>
-          </aside>
-        ) : null}
       </div>
     </div>
   );
@@ -550,92 +472,80 @@ function WorkspaceScreen({
 function AnswerBlock({ answer }) {
   const snippets = answer.implementation_snippets || [];
   const relatedFiles = answer.related_files || [];
-  const sections =
-    Array.isArray(answer.answer_sections) && answer.answer_sections.length > 0
-      ? answer.answer_sections
-      : [
-          {
-            key: "answer",
-            title: "Answer",
-            type: "markdown",
-            content: answer.direct_answer || answer.answer,
-          },
-          {
-            key: "relevant_implementation",
-            title: "Relevant implementation",
-            type: "snippets",
-            items: snippets,
-          },
-          {
-            key: "why_this_code_matters",
-            title: "Why this code matters",
-            type: "markdown",
-            content: answer.why_this_code_matters,
-          },
-          {
-            key: "related_files",
-            title: "Related files",
-            type: "files",
-            items: relatedFiles,
-          },
-        ];
+  const isArchitecture = answer.answer_mode === "architecture";
+  const answerParts = splitArchitectureAnswer(answer.direct_answer || answer.answer || "");
 
   return (
     <div className="space-y-7 text-sm leading-7 text-zinc-100">
-      {sections.map((section, sectionIndex) => {
-        const items = section.items || [];
-        if (section.type === "snippets") {
-          if (items.length === 0) return null;
-          return (
-            <AnswerSection eyebrow={section.title} key={section.key || sectionIndex}>
-              <div className="space-y-4">
-                {items.map((snippet, index) => (
-                  <ImplementationSnippet
-                    key={`${snippet.file_path}-${snippet.line_start}-${index}`}
-                    snippet={snippet}
-                  />
-                ))}
-              </div>
-            </AnswerSection>
-          );
-        }
+      <AnswerSection eyebrow={isArchitecture ? "Architecture walkthrough" : "Implementation"}>
+        <MarkdownAnswer
+          value={isArchitecture ? answerParts.walkthrough : answer.direct_answer || answer.answer}
+        />
+      </AnswerSection>
 
-        if (section.type === "files") {
-          if (items.length === 0) return null;
-          return (
-            <AnswerSection eyebrow={section.title} key={section.key || sectionIndex}>
-              <div className="overflow-hidden rounded-2xl border border-white/10 bg-black/20">
-                {items.map((file, index) => (
-                  <div
-                    key={`${file.file_path}-${index}`}
-                    className="flex gap-3 border-b border-white/10 px-4 py-3 last:border-b-0"
-                  >
-                    <Files
-                      className="mt-1 h-4 w-4 shrink-0 text-zinc-500"
-                      strokeWidth={1.8}
-                    />
-                    <div className="min-w-0">
-                      <p className="break-all font-mono text-xs font-medium leading-6 text-zinc-100">
-                        {file.file_path}
-                      </p>
-                      <p className="text-xs leading-5 text-zinc-400">{file.description}</p>
-                    </div>
+      {snippets.length > 0 ? (
+        <AnswerSection eyebrow="Relevant implementation">
+          <div className="space-y-4">
+            {snippets.map((snippet, index) => (
+              <ImplementationSnippet
+                key={`${snippet.file_path}-${snippet.line_start}-${index}`}
+                snippet={snippet}
+              />
+            ))}
+          </div>
+        </AnswerSection>
+      ) : null}
+
+      {isArchitecture && answerParts.rationale ? (
+        <AnswerSection eyebrow="Why this design">
+          <MarkdownAnswer value={answerParts.rationale} />
+        </AnswerSection>
+      ) : null}
+
+      {relatedFiles.length > 0 ? (
+        <AnswerSection eyebrow="Files involved">
+          <div className="overflow-hidden rounded-2xl border border-white/10 bg-black/20">
+            {relatedFiles.map((file, index) => (
+              <div
+                key={`${file.file_path}-${index}`}
+                className="flex gap-3 border-b border-white/10 px-4 py-3 last:border-b-0"
+              >
+                <Files
+                  className="mt-1 h-4 w-4 shrink-0 text-zinc-500"
+                  strokeWidth={1.8}
+                />
+                <div className="min-w-0">
+                  <div className="flex items-start gap-2">
+                    {file.source ? (
+                      <span className="shrink-0 font-mono text-[11px] font-semibold text-sky-300">
+                        [{file.source}]
+                      </span>
+                    ) : null}
+                    <p className="break-all font-mono text-xs font-medium leading-6 text-zinc-100">
+                      {file.file_path}
+                    </p>
                   </div>
-                ))}
+                  <p className="text-xs leading-5 text-zinc-400">{file.description}</p>
+                </div>
               </div>
-            </AnswerSection>
-          );
-        }
-
-        if (!section.content) return null;
-        return (
-          <AnswerSection eyebrow={section.title} key={section.key || sectionIndex}>
-            <MarkdownAnswer value={section.content} />
-          </AnswerSection>
-        );
-      })}
+            ))}
+          </div>
+        </AnswerSection>
+      ) : null}
     </div>
   );
+}
+
+function splitArchitectureAnswer(value) {
+  const match = /^###\s+Why this design\s*$/im.exec(value);
+  if (!match) {
+    return { walkthrough: value, rationale: "" };
+  }
+
+  return {
+    walkthrough: value.slice(0, match.index).trim(),
+    rationale: value.slice(match.index + match[0].length).trim(),
+  };
 }
 
 function AnswerSection({ eyebrow, children }) {
@@ -654,12 +564,19 @@ function ImplementationSnippet({ snippet }) {
   const code = expanded ? snippet.expanded_code : snippet.code;
   const lineStart = expanded ? snippet.expanded_line_start : snippet.line_start;
   const lineEnd = expanded ? snippet.expanded_line_end : snippet.line_end;
+  const annotations = snippet.annotations || [];
+  const annotatedLines = new Set(annotations.map((annotation) => annotation.line));
 
   return (
     <div className="overflow-hidden rounded-2xl border border-white/10 bg-[#09090b]">
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/10 px-4 py-3">
         <div className="flex min-w-0 items-center gap-2.5">
           <Code2 className="h-4 w-4 shrink-0 text-zinc-500" strokeWidth={1.9} />
+          {snippet.source ? (
+            <span className="shrink-0 font-mono text-[11px] font-semibold text-sky-300">
+              [{snippet.source}]
+            </span>
+          ) : null}
           <div className="min-w-0">
             <p className="truncate font-mono text-xs font-medium text-zinc-100">
               {snippet.file_path}
@@ -690,6 +607,7 @@ function ImplementationSnippet({ snippet }) {
           style={vscDarkPlus}
           showLineNumbers
           startingLineNumber={lineStart}
+          wrapLines
           wrapLongLines={false}
           customStyle={{
             background: "transparent",
@@ -699,10 +617,38 @@ function ImplementationSnippet({ snippet }) {
             lineHeight: "1.65",
           }}
           lineNumberStyle={{ color: "#52525b", minWidth: "2.75em" }}
+          lineProps={(lineNumber) => ({
+            style: (
+              annotatedLines.has(lineNumber)
+              || annotatedLines.has(lineStart + lineNumber - 1)
+            )
+              ? {
+                  background: "rgba(56, 189, 248, 0.08)",
+                  borderLeft: "2px solid rgba(56, 189, 248, 0.55)",
+                  display: "block",
+                }
+              : { display: "block" },
+          })}
         >
           {code || ""}
         </SyntaxHighlighter>
       </div>
+      {annotations.length > 0 ? (
+        <div className="space-y-2 border-t border-white/10 bg-sky-400/[0.03] px-4 py-3">
+          {annotations.map((annotation) => (
+            <div
+              className="flex items-start gap-2 text-xs leading-5 text-zinc-300"
+              key={`${annotation.line}-${annotation.label}`}
+            >
+              <span className="mt-0.5 text-sky-300">▲</span>
+              <span>
+                <span className="mr-2 font-mono text-sky-300">L{annotation.line}</span>
+                {annotation.label}
+              </span>
+            </div>
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -724,6 +670,7 @@ function MarkdownAnswer({ value }) {
   const elements = [];
   let paragraph = [];
   let listItems = [];
+  let listType = null;
   let codeLines = [];
   let inCodeBlock = false;
 
@@ -739,14 +686,19 @@ function MarkdownAnswer({ value }) {
 
   const flushList = () => {
     if (!listItems.length) return;
+    const ListTag = listType === "ordered" ? "ol" : "ul";
     elements.push(
-      <ul key={`ul-${elements.length}`} className="list-disc space-y-2 pl-5 text-sm leading-7 text-zinc-100">
+      <ListTag
+        key={`list-${elements.length}`}
+        className={`${listType === "ordered" ? "list-decimal" : "list-disc"} space-y-2 pl-5 text-sm leading-7 text-zinc-100`}
+      >
         {listItems.map((item, index) => (
           <li key={`li-${index}`}>{renderInlineMarkdown(item)}</li>
         ))}
-      </ul>,
+      </ListTag>,
     );
     listItems = [];
+    listType = null;
   };
 
   const flushCodeBlock = () => {
@@ -782,6 +734,16 @@ function MarkdownAnswer({ value }) {
       return;
     }
 
+    const flowSteps = parseFlowSteps(trimmed);
+    if (flowSteps) {
+      flushParagraph();
+      flushList();
+      elements.push(
+        <ExecutionFlow key={`flow-${elements.length}`} steps={flowSteps} />,
+      );
+      return;
+    }
+
     const headingMatch = trimmed.match(/^(#{1,3})\s+(.*)$/);
     if (headingMatch) {
       flushParagraph();
@@ -802,10 +764,15 @@ function MarkdownAnswer({ value }) {
       return;
     }
 
-    const listMatch = trimmed.match(/^[-*]\s+(.*)$/);
+    const listMatch = trimmed.match(/^([-*]|\d+\.)\s+(.*)$/);
     if (listMatch) {
       flushParagraph();
-      listItems.push(listMatch[1]);
+      const nextListType = /\d+\./.test(listMatch[1]) ? "ordered" : "unordered";
+      if (listType && listType !== nextListType) {
+        flushList();
+      }
+      listType = nextListType;
+      listItems.push(listMatch[2]);
       return;
     }
 
@@ -827,9 +794,40 @@ function MarkdownAnswer({ value }) {
   return <div className="space-y-4">{elements}</div>;
 }
 
+function parseFlowSteps(value) {
+  if (!value.includes("→") && !value.includes("->")) return null;
+  const steps = value
+    .split(/\s*(?:→|->)\s*/)
+    .map((step) => step.replace(/`|\*\*|\[\d+\]/g, "").trim())
+    .filter(Boolean);
+  return steps.length >= 3 ? steps : null;
+}
+
+function ExecutionFlow({ steps }) {
+  return (
+    <div className="rounded-2xl border border-sky-300/15 bg-sky-400/[0.035] px-4 py-5">
+      <div className="flex flex-col items-center" role="list" aria-label="Execution flow">
+        {steps.map((step, index) => (
+          <div className="flex w-full flex-col items-center" key={`${step}-${index}`} role="listitem">
+            <div className="w-full max-w-xl rounded-xl border border-white/10 bg-black/20 px-4 py-2.5 text-center font-mono text-xs font-medium text-zinc-100">
+              {step}
+            </div>
+            {index < steps.length - 1 ? (
+              <div className="flex h-10 flex-col items-center justify-center text-sky-300/70">
+                <span className="h-5 w-px bg-sky-300/30" />
+                <ChevronDown className="-mt-0.5 h-4 w-4" strokeWidth={2} />
+              </div>
+            ) : null}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function renderInlineMarkdown(text) {
   const nodes = [];
-  const pattern = /(`[^`]+`|\*\*[^*]+\*\*|\[[^\]]+\]\([^)]+\))/g;
+  const pattern = /(`[^`]+`|\*\*[^*]+\*\*|\[[^\]]+\]\([^)]+\)|\[\d+\])/g;
   let lastIndex = 0;
   let match;
 
@@ -853,6 +851,15 @@ function renderInlineMarkdown(text) {
         <strong key={`strong-${match.index}`} className="font-semibold text-white">
           {token.slice(2, -2)}
         </strong>,
+      );
+    } else if (/^\[\d+\]$/.test(token)) {
+      nodes.push(
+        <span
+          key={`citation-${match.index}`}
+          className="ml-0.5 font-mono text-[0.85em] font-semibold text-sky-300"
+        >
+          {token}
+        </span>,
       );
     } else {
       const linkMatch = token.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
@@ -883,40 +890,6 @@ function renderInlineMarkdown(text) {
   return nodes;
 }
 
-function CitationRail({ answer, repo }) {
-  const sources = answer.sources || [];
-
-  return (
-    <div className="space-y-4">
-      {sources.map((source, index) => (
-        <article key={`${source.file_path}-${index}`} className="flex min-h-[180px] flex-col rounded-[28px] border border-white/10 bg-white/[0.03] p-5">
-          <div className="flex items-start justify-between gap-3">
-            <a
-              className="flex items-center gap-2 text-sm font-semibold leading-6 text-white underline-offset-4 hover:underline"
-              href={buildGitHubSourceUrl(repo, source)}
-              target="_blank"
-              rel="noreferrer"
-            >
-              <Link2 className="h-4 w-4 shrink-0" strokeWidth={1.9} />
-              <span>{source.file_path}</span>
-            </a>
-          </div>
-          <div className="mt-4 flex items-start gap-2 text-sm text-zinc-300">
-            <Wrench className="mt-0.5 h-4 w-4 shrink-0" strokeWidth={1.9} />
-            <span>Function: {source.symbol_name || "Unknown symbol"}</span>
-          </div>
-          <div className="mt-2 flex items-start gap-2 text-sm text-zinc-300">
-            <MapPinned className="mt-0.5 h-4 w-4 shrink-0" strokeWidth={1.9} />
-            <span>
-              Lines: {source.line_start}–{source.line_end}
-            </span>
-          </div>
-        </article>
-      ))}
-    </div>
-  );
-}
-
 function SpinnerOnly() {
   return <span className="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />;
 }
@@ -937,12 +910,5 @@ const APP_BACKGROUND_STYLE = {
   background:
     "radial-gradient(circle at top left, rgba(255,255,255,0.08), transparent 22%), radial-gradient(circle at bottom right, rgba(0,78,146,0.2), transparent 28%), linear-gradient(to right, #004e92, #000428)",
 };
-
-function buildGitHubSourceUrl(repo, source) {
-  const baseUrl = repo?.github_url;
-  if (!baseUrl) return "#";
-  const branch = repo?.branch || "main";
-  return `${baseUrl.replace(/\/$/, "")}/blob/${branch}/${source.file_path}#L${source.line_start}-L${source.line_end}`;
-}
 
 export default App;

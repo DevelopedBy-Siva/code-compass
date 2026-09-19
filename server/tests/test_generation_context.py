@@ -220,7 +220,26 @@ class GenerationContextBuilderTests(unittest.TestCase):
         )
 
         self.assertIn("dispatch_job(job)", snippet["code"])
-        self.assertLessEqual(len(snippet["code"].splitlines()), 20)
+        self.assertLessEqual(len(snippet["code"].splitlines()), 28)
+
+    def test_display_snippet_adds_control_flow_annotations(self):
+        content = """async def handle(request):
+    solved = await solve_dependencies(request=request)
+    errors = solved.errors
+    if errors:
+        validation_error = RequestValidationError(errors)
+        raise validation_error
+    return JSONResponse({"ok": True})"""
+
+        snippet = self.builder.build_display_snippet(
+            _source(content, symbol="handle", line_start=40),
+            question="How are validation errors handled?",
+        )
+
+        labels = [annotation["label"] for annotation in snippet["annotations"]]
+        self.assertTrue(any("Dependencies are resolved" in label for label in labels))
+        self.assertTrue(any("failure path begins" in label for label in labels))
+        self.assertTrue(any("exception-handling path" in label for label in labels))
 
     def test_document_context_selects_complete_matching_heading_section(self):
         introduction = "\n".join(

@@ -168,19 +168,15 @@ class ConversationPlanningTests(unittest.TestCase):
 
 
 class AnswerExperienceTests(unittest.TestCase):
-    def test_prompt_and_response_use_implementation_presentation(self):
+    def test_prompt_and_response_use_code_walkthrough_presentation(self):
         system = CodebaseRAGSystem.__new__(CodebaseRAGSystem)
         system.llm_model = "test-model"
         system.indexing_progress = {}
-        presented_answer = """## Explanation
-The request enters the API handler and is passed to the service. [1]
-
-## Relevant implementation
-[IMPLEMENTATION_SNIPPETS]
-
-## Why this code matters
-This function owns the handoff from HTTP input to the service layer. [1]
-"""
+        presented_answer = (
+            "`handle_request` in `app.py` owns the HTTP-to-service handoff. [1]\n\n"
+            "1. It reads the request payload. [1]\n"
+            "2. It passes that payload to `service.run` and returns the result. [1]"
+        )
         system.llm_client = _FakeBedrock([presented_answer])
         trace = {}
         source = {
@@ -208,42 +204,22 @@ This function owns the handoff from HTTP input to the service layer. [1]
 
         self.assertEqual(result["answer"], result["direct_answer"])
         self.assertEqual(result["answer_mode"], "implementation")
-        self.assertIn("request enters the API handler", result["direct_answer"])
-        self.assertIn("owns the handoff", result["why_this_code_matters"])
+        self.assertIn("owns the HTTP-to-service handoff", result["direct_answer"])
         self.assertEqual(result["implementation_snippets"][0]["file_path"], "app.py")
         self.assertEqual(result["related_files"][0]["file_path"], "app.py")
         self.assertEqual(
             [section["title"] for section in result["answer_sections"]],
-            ["Explanation", "Relevant implementation", "Why this code matters"],
+            ["Explanation", "Relevant implementation", "Related files"],
         )
-        self.assertIn("## Relevant implementation", trace["final_prompt"])
-        self.assertNotIn("## Related files", trace["final_prompt"])
+        self.assertIn("senior engineer onboarding", trace["final_prompt"])
+        self.assertIn("Available implementation excerpts", trace["final_prompt"])
+        self.assertIn("`handle_request`", trace["final_prompt"])
         self.assertIn("Standalone interpretation", trace["final_prompt"])
         self.assertIn("def handle_request(request):", trace["generation_context"])
         self.assertEqual(
             trace["generation_context_stats"]["total_content_budget"],
             1500,
         )
-
-    def test_each_answer_mode_has_its_own_section_order(self):
-        expected = {
-            "architecture": ["Execution flow", "Components involved", "Related files"],
-            "implementation": [
-                "Explanation",
-                "Relevant implementation",
-                "Why this code matters",
-            ],
-            "configuration": ["Configuration", "Files", "Runtime impact"],
-            "debugging": ["Root cause", "Evidence", "Relevant implementation"],
-        }
-
-        for mode, titles in expected.items():
-            with self.subTest(mode=mode):
-                specs = CodebaseRAGSystem._answer_section_specs(mode)
-                self.assertEqual([spec["title"] for spec in specs], titles)
-                prompt = CodebaseRAGSystem._answer_structure_instructions(mode)
-                for title in titles:
-                    self.assertIn(f"## {title}", prompt)
 
     def test_answer_mode_matches_the_question_shape(self):
         cases = {
@@ -260,66 +236,95 @@ This function owns the handoff from HTTP input to the service layer. [1]
                     expected_mode,
                 )
 
-    def test_answer_validator_uses_mode_specific_sections(self):
-        architecture_answer = """## Execution flow
-The request reaches the handler. [1]
+    def test_related_files_are_derived_from_retrieved_sources(self):
+        sources = [
+            {
+                "file_path": "src/settings.py",
+                "symbol_name": "REQUEST_TIMEOUT",
+                "symbol_type": "assignment",
+            },
+            {
+                "file_path": "tests/test_settings.py",
+                "symbol_name": "test_timeout",
+                "symbol_type": "function_definition",
+            },
+        ]
 
-## Components involved
-The router and handler participate. [1]
-
-## Related files
-- `app.py` — Receives the request. [1]
-"""
-        self.assertTrue(
-            CodebaseRAGSystem._has_answer_structure(
-                architecture_answer,
-                "architecture",
-            )
-        )
-        self.assertFalse(
-            CodebaseRAGSystem._has_answer_structure(
-                architecture_answer,
-                "implementation",
-            )
+        related = CodebaseRAGSystem._build_related_files(
+            "How is the request timeout configured?",
+            sources,
         )
 
-    def test_configuration_answer_parses_files_and_runtime_impact(self):
-        source = {
-            "file_path": "src/settings.py",
-            "symbol_name": "REQUEST_TIMEOUT",
-            "symbol_type": "assignment",
-        }
-        answer = """## Configuration
-`REQUEST_TIMEOUT` controls the request deadline. [1]
+        self.assertEqual([item["file_path"] for item in related], ["src/settings.py"])
+        self.assertIn("REQUEST_TIMEOUT", related[0]["description"])
 
-## Files
-- `src/settings.py` — Defines the timeout value. [1]
+    def test_related_files_follow_flow_order_and_skip_examples(self):
+        sources = [
+            {
+                "file_path": "fastapi/exception_handlers.py",
+                "symbol_name": "request_validation_exception_handler",
+                "symbol_type": "function_definition",
+                "content": "return JSONResponse(status_code=422, content=exc.errors())",
+            },
+            {
+                "file_path": "docs_src/tutorial004.py",
+                "symbol_name": "tutorial004",
+                "symbol_type": "function_definition",
+            },
+            {
+                "file_path": "fastapi/routing.py",
+                "symbol_name": "get_request_handler",
+                "symbol_type": "function_definition",
+                "content": (
+                    "solved_result = await solve_dependencies(request=request)\n"
+                    "errors = solved_result.errors\n"
+                    "raw_response = await run_endpoint_function(...)"
+                ),
+            },
+            {
+                "file_path": "fastapi/exceptions.py",
+                "symbol_name": "RequestValidationError",
+                "symbol_type": "class_definition",
+            },
+        ]
 
-## Runtime impact
-The value changes how long a request may run before timing out. [1]
-"""
-
-        parsed = CodebaseRAGSystem._parse_presented_answer(
-            answer,
-            [source],
-            question="How is the request timeout configured?",
-            answer_mode="configuration",
+        related = CodebaseRAGSystem._build_related_files(
+            "How are invalid requests converted into HTTP responses?",
+            sources,
+            "The flow starts in routing. [3] It raises an exception. [4] "
+            "The handler renders the response. [1]",
         )
 
         self.assertEqual(
-            [section["type"] for section in parsed["answer_sections"]],
-            ["markdown", "files", "markdown"],
+            [item["file_path"] for item in related],
+            [
+                "fastapi/routing.py",
+                "fastapi/exceptions.py",
+                "fastapi/exception_handlers.py",
+            ],
         )
-        self.assertEqual(
-            parsed["answer_sections"][1]["items"][0]["file_path"],
-            "src/settings.py",
-        )
-        self.assertIn(
-            "how long a request may run",
-            parsed["answer_sections"][2]["content"],
+        self.assertIn("dependency resolution", related[0]["description"])
+        self.assertIn("validation", related[0]["description"])
+        self.assertIn("error rendering", related[1]["description"])
+        self.assertIn("HTTP response", related[2]["description"])
+
+    def test_snippets_follow_the_explanations_citation_order(self):
+        snippets = [
+            {"source": 1, "file_path": "exception_handlers.py"},
+            {"source": 3, "file_path": "routing.py"},
+        ]
+
+        ordered = CodebaseRAGSystem._order_by_citations(
+            snippets,
+            "Request processing starts in routing. [3] Failures reach the handler. [1]",
         )
 
-    def test_snippet_is_centered_and_never_exceeds_twenty_lines(self):
+        self.assertEqual(
+            [snippet["file_path"] for snippet in ordered],
+            ["routing.py", "exception_handlers.py"],
+        )
+
+    def test_snippet_is_centered_with_surrounding_context(self):
         content = "\n".join(f"line {index}" for index in range(1, 51))
         source = {
             "file_path": "src/service.py",
@@ -332,10 +337,10 @@ The value changes how long a request may run before timing out. [1]
 
         snippet = CodebaseRAGSystem._extract_display_snippet(source)
 
-        self.assertLessEqual(len(snippet["code"].splitlines()), 20)
+        self.assertLessEqual(len(snippet["code"].splitlines()), 28)
         self.assertIn("def target_handler():", snippet["code"])
         self.assertTrue(snippet["expandable"])
-        self.assertLessEqual(len(snippet["expanded_code"].splitlines()), 60)
+        self.assertLessEqual(len(snippet["expanded_code"].splitlines()), 70)
 
     def test_implementation_sources_rank_above_tests_and_docs(self):
         sources = [

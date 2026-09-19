@@ -129,8 +129,8 @@ class GenerationContextBuilder:
         self,
         source: dict,
         question: str = "",
-        max_lines: int = 20,
-        expanded_max: int = 60,
+        max_lines: int = 28,
+        expanded_max: int = 70,
     ) -> dict:
         lines = str(source.get("content") or "").splitlines()
         if not lines:
@@ -141,7 +141,7 @@ class GenerationContextBuilder:
         else:
             candidates = self._candidate_spans(source, lines, question)
             anchor = self._display_anchor(candidates, source, lines, question)
-            visible_start, visible_end = self._centered_window(
+            visible_start, visible_end = self._leading_context_window(
                 anchor,
                 len(lines),
                 max_lines,
@@ -158,6 +158,10 @@ class GenerationContextBuilder:
             )
 
         source_line_start = int(source.get("line_start") or 1)
+        annotations = self._build_annotations(
+            lines[visible_start:visible_end],
+            source_line_start + visible_start,
+        )
         return {
             "file_path": source.get("file_path"),
             "language": source.get("language") or "text",
@@ -169,7 +173,48 @@ class GenerationContextBuilder:
             "expanded_line_end": source_line_start + expanded_end - 1,
             "expanded_code": "\n".join(lines[expanded_start:expanded_end]),
             "expandable": expanded_start < visible_start or expanded_end > visible_end,
+            "annotations": annotations,
         }
+
+    @staticmethod
+    def _build_annotations(lines: List[str], line_start: int) -> List[dict]:
+        candidates = []
+        for offset, line in enumerate(lines):
+            stripped = line.strip()
+            lowered = stripped.lower()
+            label = None
+            priority = 0
+
+            if re.search(r"\bif\b.*\berrors?\b", lowered):
+                label = "The failure path begins when earlier processing has collected errors."
+                priority = 100
+            elif re.search(r"\braise\b", lowered):
+                label = "Control leaves this function here and transfers to the exception-handling path."
+                priority = 95
+            elif "depend" in lowered and any(
+                token in lowered for token in {"solve", "resolve"}
+            ):
+                label = "Dependencies are resolved here before endpoint execution continues."
+                priority = 90
+            elif "response" in lowered and re.search(r"\breturn\b", lowered):
+                label = "The response object leaves this handler here."
+                priority = 85
+
+            if label:
+                candidates.append(
+                    {
+                        "line": line_start + offset,
+                        "label": label,
+                        "priority": priority,
+                    }
+                )
+
+        selected = sorted(candidates, key=lambda item: item["priority"], reverse=True)[:3]
+        selected.sort(key=lambda item: item["line"])
+        return [
+            {"line": item["line"], "label": item["label"]}
+            for item in selected
+        ]
 
     def _allocate_budgets(
         self,
@@ -815,6 +860,18 @@ class GenerationContextBuilder:
         start = max(0, anchor - count // 2)
         start = min(start, max(0, line_count - count))
         return start, start + count
+
+    @staticmethod
+    def _leading_context_window(
+        anchor: int,
+        line_count: int,
+        window_size: int,
+    ) -> tuple[int, int]:
+        count = min(max(1, window_size), line_count)
+        start = max(0, anchor - min(10, count - 1))
+        end = min(line_count, start + count)
+        start = max(0, end - count)
+        return start, end
 
     @staticmethod
     def _render_source_block(source: dict, selected: SelectedSourceContext) -> str:
