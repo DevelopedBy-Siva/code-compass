@@ -413,35 +413,37 @@ function WorkspaceScreen({
 
           <div
             ref={messagesContainerRef}
-            className="scrollbar-thin flex flex-1 flex-col gap-4 overflow-auto px-5 py-6 md:px-8"
+            className="scrollbar-thin flex-1 overflow-auto px-5 py-6 md:px-8"
           >
-            {messages.length === 0 ? (
-              <div className="flex flex-1 items-center justify-center rounded-[28px] border border-dashed border-white/10 bg-white/[0.02] p-8 text-center text-zinc-500">
-                Ask a question
-              </div>
-            ) : (
-              messages.map((message) => (
-                <article
-                  key={message.id}
-                  className={[
-                    "rounded-[28px] border px-5 py-4",
-                    message.role === "user"
-                      ? "ml-auto max-w-[60%] border-white/25 bg-white/[0.16] text-white backdrop-blur-xl"
-                      : "w-full border-white/10 bg-white/[0.03] text-white",
-                  ].join(" ")}
-                >
-                  {message.answerData ? (
-                    <AnswerBlock answer={message.answerData} />
-                  ) : (
-                    <p className="text-sm leading-7">{message.content}</p>
-                  )}
-                </article>
-              ))
-            )}
+            <div className="mx-auto flex min-h-full w-full max-w-5xl flex-col gap-4">
+              {messages.length === 0 ? (
+                <div className="flex flex-1 items-center justify-center rounded-[28px] border border-dashed border-white/10 bg-white/[0.02] p-8 text-center text-zinc-500">
+                  Ask a question
+                </div>
+              ) : (
+                messages.map((message) => (
+                  <article
+                    key={message.id}
+                    className={[
+                      "w-fit rounded-[28px] border px-5 py-4",
+                      message.role === "user"
+                        ? "ml-auto max-w-[60%] border-white/25 bg-white/[0.16] text-white backdrop-blur-xl"
+                        : "max-w-full border-white/10 bg-white/[0.03] text-white",
+                    ].join(" ")}
+                  >
+                    {message.answerData ? (
+                      <AnswerBlock answer={message.answerData} />
+                    ) : (
+                      <p className="text-sm leading-7">{message.content}</p>
+                    )}
+                  </article>
+                ))
+              )}
+            </div>
           </div>
 
           <div className="border-t border-white/10 bg-transparent px-5 py-4 md:px-8">
-            <div className="rounded-[32px] border border-white/10 bg-white/[0.04] p-4 shadow-[0_40px_120px_rgba(0,0,0,0.45)] backdrop-blur-xl">
+            <div className="mx-auto w-full max-w-5xl rounded-[32px] border border-white/10 bg-white/[0.04] p-4 shadow-[0_40px_120px_rgba(0,0,0,0.45)] backdrop-blur-xl">
               <div className="flex flex-col gap-3">
                 <div className="relative">
                   <textarea
