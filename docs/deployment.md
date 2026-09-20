@@ -1,14 +1,16 @@
-# Code Compass: Operations and Deployment
+# Deployment & Operations Guide
 
 This document covers evaluation, API usage, runtime configuration, the SageMaker serving contract, AWS resources and IAM, deployment workflows, and operational constraints.
 
-## Retrieval and conversation details
+## Retrieval Pipeline
 
-The backend shallow-clones public repositories, ignores generated and dependency directories, and keeps supported source, configuration, markup, and documentation files. Tree-sitter creates chunks around functions, classes, methods, declarations, and containers. Large classes receive overview chunks while their methods remain independently searchable. Each parsed source file also receives a module overview with its path, role, imports, exports, and symbols; plain-text and unsupported-language files use bounded fallback chunking. Clones are deleted after indexing.
+The backend shallow-clones public repositories, excludes generated and dependency directories, and chunks supported files around functions, classes, methods, declarations, and containers. Large classes and source files also receive overview chunks, while plain-text and unsupported-language files use bounded fallback chunking. Clones are deleted after indexing.
 
 Qdrant is both the vector store and persistent repository cache. A canonical repository-and-branch key lets a new session reuse an index. Re-indexing uploads a hidden generation, activates it only after every vector is stored, then removes the previous generation. A failed rebuild leaves the working cache intact.
 
-Each question uses Qwen3 semantic retrieval, BM25, path and intent signals, and Reciprocal Rank Fusion. Controlled over-fetching precedes deduplication so repeated chunks and translated documentation cannot consume the candidate budget. Qwen3-Reranker-0.6B scores candidates with its native `yes`/`no` relevance format; final selection combines semantic, lexical, path, reranker, canonical-source, and diversity signals.
+Each question uses Qwen3 semantic retrieval, BM25, path and intent signals, and Reciprocal Rank Fusion. Candidates are deduplicated, reranked with Qwen3-Reranker-0.6B, and selected using relevance, source quality, and diversity signals.
+
+## Conversation Layer
 
 Before retrieval, the conversation layer routes social messages, rewrites contextual follow-ups into standalone repository questions, and asks for clarification when a reference has no reliable antecedent. Debug responses can include a `conversation_trace` with the original query, standalone rewrite, retrieval query, and final Bedrock prompt. The answer prompt requires concrete files and symbols, evidence/inference separation, inline citations, and an explicit acknowledgement when evidence is insufficient. Citation numbers are validated before the response is returned.
 
@@ -161,18 +163,17 @@ The role needs only `sagemaker:InvokeEndpoint` on this endpoint. Restrict its OI
 
 ## Deploy from a workstation
 
-Prerequisites are Docker, AWS CLI v2, `jq`, `openssl`, and AWS credentials authorized for ECR and SageMaker.
+### Prerequisites
+
+Install Docker, AWS CLI v2, `jq`, and `openssl`, and configure AWS credentials authorized for ECR and SageMaker.
+
+### Environment variables
+
+Load `AWS_REGION`, `ECR_REPOSITORY`, `SAGEMAKER_ENDPOINT_NAME`, `SAGEMAKER_EXECUTION_ROLE_ARN`, `QDRANT_URL`, and `CORS_ORIGINS` into the current shell. Provide either `QDRANT_API_KEY_SECRET_ARN` or `QDRANT_API_KEY`. `SAGEMAKER_INSTANCE_TYPE` defaults to `ml.g5.xlarge`; the remaining runtime options are documented in [Runtime configuration](#runtime-configuration).
+
+### Deploy
 
 ```bash
-export AWS_REGION=us-east-1
-export ECR_REPOSITORY=code-compass-backend
-export SAGEMAKER_ENDPOINT_NAME=code-compass
-export SAGEMAKER_EXECUTION_ROLE_ARN=arn:aws:iam::123456789012:role/code-compass-sagemaker
-export SAGEMAKER_INSTANCE_TYPE=ml.g5.xlarge
-export QDRANT_URL=https://your-cluster.us-east.aws.cloud.qdrant.io:6333
-export QDRANT_API_KEY=your-qdrant-api-key
-export CORS_ORIGINS=https://your-project.vercel.app
-
 ./scripts/test-local-sagemaker.sh
 ./scripts/push.sh
 ./scripts/deploy.sh
@@ -211,26 +212,7 @@ The direct Qdrant key is convenient for a personal deployment, but places it in 
 
 For Vercel, set `AWS_ROLE_ARN`, `SAGEMAKER_AWS_REGION`, and `SAGEMAKER_ENDPOINT_NAME`. Enable OIDC and configure the trust policy. Leave `REACT_APP_API_URL` unset in production so the UI uses the same-origin adapter; set it to `http://localhost:8000` locally.
 
-## Repository layout
-
-```text
-code-compass/
-├── server/
-│   ├── server_app.py             # FastAPI routes and request models
-│   ├── Dockerfile                # SageMaker-compatible image
-│   ├── entrypoint.sh             # Port 8080 and signal-safe startup
-│   ├── evals/                    # Evaluation runner and 24-case suite
-│   ├── src/                      # Parsing, retrieval, storage, orchestration
-│   └── tests/                    # Retrieval and deployment regressions
-├── ui/
-│   ├── api/proxy.js              # OIDC SageMaker invocation adapter
-│   └── src/                      # React application
-├── scripts/                      # Build, test, push, and deployment scripts
-├── .github/workflows/            # OIDC CI/CD workflow
-└── images/                       # Release screenshots
-```
-
-## Operational constraints
+## Known Operational Constraints
 
 - Only public GitHub repositories are supported.
 - Repository metadata, active sessions, and lexical indexes are process-local.
