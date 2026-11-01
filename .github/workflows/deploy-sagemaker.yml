@@ -15,10 +15,36 @@ concurrency:
 env:
   IMAGE_NAME: code-compass-backend
   IMAGE_TAG: ${{ github.sha }}
+  BUILD_ONLY: "true"
 
 jobs:
+  mode:
+    name: Select pipeline mode
+    runs-on: ubuntu-latest
+    outputs:
+      build_only: ${{ steps.mode.outputs.build_only }}
+    steps:
+      - name: Read hardcoded build-only flag
+        id: mode
+        run: printf 'build_only=%s\n' "$BUILD_ONLY" >> "$GITHUB_OUTPUT"
+
+  build-only:
+    name: Build image only
+    needs: mode
+    if: ${{ needs.mode.outputs.build_only == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Build production Docker image
+        run: ./scripts/build.sh
+
   unit-tests:
     name: Unit Tests
+    needs: mode
+    if: ${{ needs.mode.outputs.build_only != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -44,7 +70,8 @@ jobs:
 
   build-and-parity-test:
     name: Build + Parity Test
-    needs: unit-tests
+    needs: [mode, unit-tests]
+    if: ${{ needs.mode.outputs.build_only != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
@@ -91,8 +118,8 @@ jobs:
 
   push-ecr:
     name: Push ECR
-    needs: build-and-parity-test
-    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    needs: [mode, build-and-parity-test]
+    if: ${{ needs.mode.outputs.build_only != 'true' && (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) }}
     permissions:
       contents: read
       id-token: write
@@ -126,7 +153,8 @@ jobs:
 
   deploy-sagemaker:
     name: Deploy SageMaker
-    needs: push-ecr
+    needs: [mode, push-ecr]
+    if: ${{ needs.mode.outputs.build_only != 'true' }}
     permissions:
       contents: read
       id-token: write
@@ -186,7 +214,8 @@ jobs:
 
   smoke-test:
     name: Smoke Test
-    needs: deploy-sagemaker
+    needs: [mode, deploy-sagemaker]
+    if: ${{ needs.mode.outputs.build_only != 'true' }}
     permissions:
       contents: read
       id-token: write

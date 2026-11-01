@@ -1,14 +1,12 @@
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
 
 SERVER_ROOT = Path(__file__).resolve().parents[1]
 if str(SERVER_ROOT) not in sys.path:
     sys.path.insert(0, str(SERVER_ROOT))
 
-from evals.run_eval import judge_faithfulness
 from src.generation_context import GenerationContextBuilder
 
 
@@ -274,31 +272,6 @@ Restart the service after changing deployment settings.
         self.assertIn("Set `AUTH_ISSUER`", selected.text)
         self.assertIn("[omitted lines", selected.text)
         self.assertLessEqual(selected.used_chars, 1500)
-
-
-class FaithfulnessContextTests(unittest.TestCase):
-    def test_faithfulness_uses_exact_generation_context(self):
-        class FakeRagSystem:
-            def __init__(self):
-                self.user_prompt = ""
-
-            def _generate_markdown_response(self, system_prompt, user_prompt):
-                self.user_prompt = user_prompt
-                return "0.75", "stop"
-
-        rag_system = FakeRagSystem()
-        exact_context = "[Source 1]\nLines shown: 1, 90-92\nlate_return_branch()"
-
-        with patch("evals.run_eval.ENABLE_FAITHFULNESS", True):
-            score = judge_faithfulness(
-                rag_system,
-                "How does it finish?",
-                "It uses the late return branch. [1]",
-                exact_context,
-            )
-
-        self.assertEqual(score, 0.75)
-        self.assertIn(exact_context, rag_system.user_prompt)
 
 
 if __name__ == "__main__":

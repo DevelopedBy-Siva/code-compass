@@ -587,6 +587,7 @@ class CodebaseRAGSystem:
         top_k: int = 8,
         history=None,
         debug_retrieval: bool = False,
+        retrieval_only: bool = False,
     ) -> dict:
         with self.repo_lock:
             self._cleanup_expired_sessions()
@@ -603,7 +604,11 @@ class CodebaseRAGSystem:
             self._touch_session(session_key)
 
         normalized_history = self._normalize_history(history or [])
-        conversation_plan = self._plan_conversation(question, normalized_history)
+        conversation_plan = self._plan_conversation(
+            question,
+            normalized_history,
+            allow_llm=not retrieval_only,
+        )
         if conversation_plan.rewritten_query != question:
             query_logger.info(
                 "rewritten=%s",
@@ -764,6 +769,16 @@ class CodebaseRAGSystem:
                     item["rerank_rank"] or 10**9,
                 )
             )
+
+        if retrieval_only:
+            answer = {
+                "sources": final_sources,
+                "repo": self._serialize_repo(repo),
+            }
+            if debug_retrieval:
+                answer["retrieval_debug"] = retrieval_debug
+                answer["conversation_trace"] = dict(trace)
+            return answer
 
         answer = self._generate_answer(
             repo,
@@ -1512,6 +1527,7 @@ Explain where the behavior is implemented, how the relevant code works, and how 
         self,
         question: str,
         history: List[dict],
+        allow_llm: bool = True,
     ) -> ConversationPlan:
         normalized = " ".join((question or "").strip().split())
         if self._is_casual_conversation(normalized):
@@ -1535,6 +1551,15 @@ Explain where the behavior is implemented, how the relevant code works, and how 
                 route="clarify",
                 rewritten_query=normalized,
                 clarification_question=self._targeted_clarification(normalized),
+            )
+
+        if not allow_llm:
+            return ConversationPlan(
+                route="retrieve",
+                rewritten_query=self._fallback_conversation_rewrite(
+                    normalized,
+                    usable_history,
+                ),
             )
 
         rewrite_system_prompt = """

@@ -14,7 +14,6 @@ SERVER_ROOT = Path(__file__).resolve().parents[1]
 if str(SERVER_ROOT) not in sys.path:
     sys.path.insert(0, str(SERVER_ROOT))
 
-from evals.run_eval import compute_debug_stage_metrics
 from src.code_parser import CodeParser
 from src.embeddings import EmbeddingGenerator, RETRIEVAL_INSTRUCTION
 from src.hybrid_search import HybridSearchEngine, RERANK_SUFFIX
@@ -165,15 +164,6 @@ class RetrievalPipelineTests(unittest.TestCase):
                     CodebaseRAGSystem._question_intent(question),
                     expected_intent,
                 )
-
-    def test_stage_metric_preserves_original_rank(self):
-        debug = [
-            {"file_path": "wrong.py", "semantic_rank": 1},
-            {"file_path": "expected.py", "semantic_rank": 2},
-        ]
-        metrics = compute_debug_stage_metrics(["expected.py"], debug, "semantic_rank")
-        self.assertEqual(metrics["retrieval_hit"], 1)
-        self.assertEqual(metrics["reciprocal_rank"], 0.5)
 
     def test_path_only_match_cannot_overpower_dual_retriever_match(self):
         system = CodebaseRAGSystem.__new__(CodebaseRAGSystem)

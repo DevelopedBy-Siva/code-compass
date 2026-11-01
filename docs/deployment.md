@@ -16,29 +16,7 @@ Before retrieval, the conversation layer routes social messages, rewrites contex
 
 ## Evaluation
 
-The suite contains 24 hand-written questions—eight each for Documenso, FastAPI, and Django—and covers repository purpose, implementation lookup, API behavior, configuration, tests, error handling, security, cross-file flows, and conversational follow-ups.
-
-Reported metrics include candidate, semantic, lexical, fused, and path hit rates; reranker and prioritized Top-K hit rates; final-context retrieval hit rate; Top-1 hit rate; Mean Reciprocal Rank; expected-source grounded-answer rate; and optional LLM-judged faithfulness. Because the same Bedrock model generates and judges answers, faithfulness is a regression signal rather than an independent evaluation.
-
-Run the complete evaluation from the repository root:
-
-```bash
-CODEBASE_RAG_REINDEX=1 \
-CODEBASE_RAG_EVAL_OUTPUT=server/evals/results/full_eval.json \
-python server/evals/run_eval.py
-```
-
-Run one repository while iterating:
-
-```bash
-CODEBASE_RAG_EVAL_REPOS=fastapi \
-CODEBASE_RAG_REINDEX=1 \
-CODEBASE_RAG_ENABLE_FAITHFULNESS=0 \
-CODEBASE_RAG_EVAL_OUTPUT=server/evals/results/fastapi.json \
-python server/evals/run_eval.py
-```
-
-Valid repository IDs are `documenso`, `fastapi`, and `django`. Cases live in [`server/evals/sample_eval_set.json`](../server/evals/sample_eval_set.json), and regression tests live in [`server/tests/test_retrieval_quality.py`](../server/tests/test_retrieval_quality.py).
+The retrieval benchmark compares vector-only search with hybrid retrieval and reranking over 120 questions. See the [evaluation guide](evaluation.md) for metric definitions, verified results, reproducibility details, and commands.
 
 ## API
 
