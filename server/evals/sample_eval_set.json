@@ -73,6 +73,502 @@
           "expected_sources": ["packages/signing/index.ts", "packages/signing/transports", "packages/signing/helpers", "packages/lib/jobs/definitions/internal/seal-document.handler.ts", ".env.example"],
           "must_include_any": ["packages/signing", "transports", "seal-document", "PDF", "signing"]
         }
+      ,
+        {
+          "id": "documenso-remix-server-entry",
+          "category": "architecture",
+          "question": "What role does the Remix server play in Documenso's application architecture?",
+          "ground_truth": "The Remix application is the main user-facing app. Its server mounts the Hono routes and connects the web application to the API and server-side behavior.",
+          "expected_sources": [
+            "ARCHITECTURE.md",
+            "apps/remix/server"
+          ],
+          "must_include_any": [
+            "main application",
+            "Hono",
+            "apps/remix/server"
+          ]
+        },
+        {
+          "id": "documenso-api-v1-location",
+          "category": "api",
+          "question": "Where does the legacy API V1 live, and what API framework does it use?",
+          "ground_truth": "The deprecated but maintained API V1 is under packages/api/v1 and uses ts-rest for contract-based REST endpoints.",
+          "expected_sources": [
+            "ARCHITECTURE.md",
+            "packages/api/v1"
+          ],
+          "must_include_any": [
+            "packages/api/v1",
+            "ts-rest",
+            "API V1"
+          ]
+        },
+        {
+          "id": "documenso-prisma-data-layer",
+          "category": "implementation",
+          "question": "Which package owns Documenso's database schema and data access layer?",
+          "ground_truth": "The packages/prisma package owns the Prisma schema and database client, and the architecture also identifies Kysely in the data layer.",
+          "expected_sources": [
+            "ARCHITECTURE.md",
+            "packages/prisma"
+          ],
+          "must_include_any": [
+            "packages/prisma",
+            "Prisma",
+            "Kysely"
+          ]
+        },
+        {
+          "id": "documenso-auth-package",
+          "category": "architecture",
+          "question": "Where is authentication functionality grouped, and which authentication approaches are listed?",
+          "ground_truth": "Authentication is grouped in packages/auth. The architecture describes OAuth through Arctic and WebAuthn/passkeys as supported approaches.",
+          "expected_sources": [
+            "ARCHITECTURE.md",
+            "packages/auth"
+          ],
+          "must_include_any": [
+            "packages/auth",
+            "OAuth",
+            "WebAuthn",
+            "Passkeys"
+          ]
+        },
+        {
+          "id": "documenso-background-jobs",
+          "category": "implementation",
+          "question": "Where are background job definitions located in the Documenso monorepo?",
+          "ground_truth": "Background job code is grouped under packages/lib/jobs. The architecture lists Inngest and local execution among the job technologies.",
+          "expected_sources": [
+            "ARCHITECTURE.md",
+            "packages/lib/jobs"
+          ],
+          "must_include_any": [
+            "packages/lib/jobs",
+            "Inngest",
+            "jobs"
+          ]
+        },
+        {
+          "id": "documenso-email-package",
+          "category": "implementation",
+          "question": "Which package owns email templates and mail delivery?",
+          "ground_truth": "Email templates and the mailer are grouped in packages/email; the architecture lists React Email and Nodemailer in this layer.",
+          "expected_sources": [
+            "ARCHITECTURE.md",
+            "packages/email"
+          ],
+          "must_include_any": [
+            "packages/email",
+            "React Email",
+            "Nodemailer"
+          ]
+        },
+        {
+          "id": "documenso-storage-architecture",
+          "category": "architecture",
+          "question": "What storage approaches does Documenso list for documents and related assets?",
+          "ground_truth": "The architecture lists S3-compatible storage and database-backed storage as options in the storage layer.",
+          "expected_sources": [
+            "ARCHITECTURE.md",
+            "packages/lib/server-only"
+          ],
+          "must_include_any": [
+            "S3-compatible",
+            "database",
+            "storage"
+          ]
+        },
+        {
+          "id": "documenso-document-router-layout",
+          "category": "implementation",
+          "question": "How are document operations organized inside the current tRPC server package?",
+          "ground_truth": "Document procedures are grouped under packages/trpc/server/document-router, with individual operation modules such as get-document and related type files.",
+          "expected_sources": [
+            "ARCHITECTURE.md",
+            "packages/trpc/server/document-router"
+          ],
+          "must_include_any": [
+            "document-router",
+            "get-document",
+            "packages/trpc/server"
+          ]
+        },
+        {
+          "id": "documenso-envelope-api",
+          "category": "api",
+          "question": "Where are API V2 envelope operations organized, and what kind of workflow do they represent?",
+          "ground_truth": "API V2 envelope operations are organized in the tRPC server's envelope-router. The architecture describes envelopes as supporting multi-document workflows.",
+          "expected_sources": [
+            "ARCHITECTURE.md",
+            "packages/trpc/server/envelope-router"
+          ],
+          "must_include_any": [
+            "envelope-router",
+            "multi-document",
+            "API V2"
+          ]
+        },
+        {
+          "id": "documenso-openapi-exposure",
+          "category": "api",
+          "question": "How does Documenso expose OpenAPI support for its current API?",
+          "ground_truth": "The current tRPC API V2 uses trpc-to-openapi support and is mounted under the API V2 route prefixes documented in the repository architecture.",
+          "expected_sources": [
+            "ARCHITECTURE.md",
+            "packages/trpc/server",
+            "apps/remix/server"
+          ],
+          "must_include_any": [
+            "trpc-to-openapi",
+            "API V2",
+            "OpenAPI"
+          ]
+        },
+        {
+          "id": "documenso-server-only-boundary",
+          "category": "architecture",
+          "question": "How does the repository distinguish server-only business logic from client-side and shared code?",
+          "ground_truth": "The lib package is divided into server-only, client-only, and universal code, making the intended execution boundary explicit in the monorepo structure.",
+          "expected_sources": [
+            "ARCHITECTURE.md",
+            "packages/lib/server-only",
+            "packages/lib/client-only",
+            "packages/lib/universal"
+          ],
+          "must_include_any": [
+            "server-only",
+            "client-only",
+            "universal"
+          ]
+        },
+        {
+          "id": "documenso-document-create-handoff",
+          "category": "cross-file",
+          "question": "At a high level, how does a document creation API operation reach document business logic?",
+          "ground_truth": "A document operation is exposed through a procedure in the tRPC document router, which delegates server-side behavior to the lib package's server-only document code. The exact operation module and helper determine the detailed handoffs.",
+          "expected_sources": [
+            "packages/trpc/server/document-router",
+            "packages/lib/server-only/document"
+          ],
+          "must_include_any": [
+            "document-router",
+            "server-only/document",
+            "procedure"
+          ]
+        },
+        {
+          "id": "documenso-recipient-business-logic",
+          "category": "implementation",
+          "question": "Where is server-side recipient business logic grouped?",
+          "ground_truth": "Recipient-related server business logic is grouped under packages/lib/server-only/recipient, separate from the API router layer.",
+          "expected_sources": [
+            "packages/lib/server-only/recipient",
+            "packages/trpc/server/document-router"
+          ],
+          "must_include_any": [
+            "server-only/recipient",
+            "recipient",
+            "server-side"
+          ]
+        },
+        {
+          "id": "documenso-signing-transports",
+          "category": "implementation",
+          "question": "What signing backends are represented by the signing package's transport layer?",
+          "ground_truth": "The signing package separates signing transports and supports local P12 signing and Google Cloud KMS/HSM-backed signing, as described in the architecture and package layout.",
+          "expected_sources": [
+            "ARCHITECTURE.md",
+            "packages/signing/transports"
+          ],
+          "must_include_any": [
+            "P12",
+            "Google Cloud KMS",
+            "transports"
+          ]
+        },
+        {
+          "id": "documenso-signing-timestamp-authority",
+          "category": "specific-function",
+          "question": "What timestamp-authority behavior does the PDF signing entry point support?",
+          "ground_truth": "The signing entry point can apply timestamp-authority settings when configured as part of PDF signing; the behavior is implemented in the signing package and its helpers.",
+          "expected_sources": [
+            "packages/signing/index.ts",
+            "packages/signing/helpers"
+          ],
+          "must_include_any": [
+            "timestamp",
+            "signPdf",
+            "signing"
+          ]
+        },
+        {
+          "id": "documenso-seal-document-job",
+          "category": "cross-file",
+          "question": "Which background job connects completed-document sealing with the signing package?",
+          "ground_truth": "The internal seal-document job handler is the job-layer integration point for sealing completed documents and passing PDF signing work into the signing package.",
+          "expected_sources": [
+            "packages/lib/jobs/definitions/internal/seal-document.handler.ts",
+            "packages/signing"
+          ],
+          "must_include_any": [
+            "seal-document",
+            "signing",
+            "PDF"
+          ]
+        },
+        {
+          "id": "documenso-webhook-package",
+          "category": "security",
+          "question": "Where should an engineer inspect server-side webhook behavior and its request-safety checks?",
+          "ground_truth": "Webhook server-side behavior is grouped under packages/lib/server-only/webhooks. Related SSRF configuration is documented in the environment example and self-hosting configuration.",
+          "expected_sources": [
+            "packages/lib/server-only/webhooks",
+            ".env.example"
+          ],
+          "must_include_any": [
+            "webhooks",
+            "SSRF",
+            "server-only"
+          ]
+        },
+        {
+          "id": "documenso-environment-database-email",
+          "category": "config-setup",
+          "question": "Which configuration areas should be set up for self-hosted database and email delivery?",
+          "ground_truth": "Self-hosting configuration includes database connectivity and SMTP/email delivery settings. The environment example and self-hosting environment documentation enumerate the concrete variables.",
+          "expected_sources": [
+            ".env.example",
+            "apps/docs/content/docs/self-hosting/configuration/environment.mdx"
+          ],
+          "must_include_any": [
+            "DATABASE_URL",
+            "SMTP",
+            "email"
+          ]
+        },
+        {
+          "id": "documenso-monorepo-test-package",
+          "category": "tests",
+          "question": "Which package is intended for end-to-end application testing, and what runner does it use?",
+          "ground_truth": "The @documenso/app-tests package under packages/app-tests contains end-to-end app tests and uses Playwright.",
+          "expected_sources": [
+            "ARCHITECTURE.md",
+            "packages/app-tests",
+            "packages/app-tests/package.json"
+          ],
+          "must_include_any": [
+            "packages/app-tests",
+            "Playwright",
+            "E2E"
+          ]
+        },
+        {
+          "id": "documenso-ui-component-library",
+          "category": "architecture",
+          "question": "Where are shared UI components maintained, and which component and styling tools are listed?",
+          "ground_truth": "Shared UI components are grouped in packages/ui. The architecture lists Shadcn, Radix, and Tailwind in this layer.",
+          "expected_sources": [
+            "ARCHITECTURE.md",
+            "packages/ui"
+          ],
+          "must_include_any": [
+            "packages/ui",
+            "Radix",
+            "Tailwind"
+          ]
+        },
+        {
+          "id": "documenso-pdf-stack",
+          "category": "architecture",
+          "question": "Which PDF technologies are listed in Documenso's architecture?",
+          "ground_truth": "The architecture lists @libpdf/core and pdfjs-dist in the PDF technology stack.",
+          "expected_sources": [
+            "ARCHITECTURE.md",
+            "packages/lib/server-only/pdf"
+          ],
+          "must_include_any": [
+            "@libpdf/core",
+            "pdfjs-dist",
+            "PDF"
+          ]
+        },
+        {
+          "id": "documenso-application-routes",
+          "category": "implementation",
+          "question": "Where are the main Remix application's authenticated and recipient-facing routes organized?",
+          "ground_truth": "The main Remix app organizes route modules under apps/remix/app/routes, including authenticated, unauthenticated, and recipient route groups.",
+          "expected_sources": [
+            "ARCHITECTURE.md",
+            "apps/remix/app/routes"
+          ],
+          "must_include_any": [
+            "apps/remix/app/routes",
+            "authenticated",
+            "recipient"
+          ]
+        },
+        {
+          "id": "documenso-hono-entrypoint",
+          "category": "implementation",
+          "question": "Which files are identified as the Remix server's Hono route-mounting and process entry points?",
+          "ground_truth": "The architecture identifies apps/remix/server/router.ts for Hono route mounting and apps/remix/server/main.js as the server entry point.",
+          "expected_sources": [
+            "ARCHITECTURE.md",
+            "apps/remix/server"
+          ],
+          "must_include_any": [
+            "router.ts",
+            "main.js",
+            "Hono"
+          ]
+        },
+        {
+          "id": "documenso-api-auth-modes",
+          "category": "security",
+          "question": "What authentication methods does the current API V2 document for API access?",
+          "ground_truth": "The API V2 architecture lists API token or session-cookie authentication for the current API.",
+          "expected_sources": [
+            "ARCHITECTURE.md",
+            "packages/trpc/server"
+          ],
+          "must_include_any": [
+            "API Token",
+            "Session Cookie",
+            "API V2"
+          ]
+        },
+        {
+          "id": "documenso-api-v1-status",
+          "category": "api",
+          "question": "Is API V1 removed, or does the repository still maintain it?",
+          "ground_truth": "The architecture labels API V1 deprecated but maintained; its implementation remains under packages/api/v1.",
+          "expected_sources": [
+            "ARCHITECTURE.md",
+            "packages/api/v1"
+          ],
+          "must_include_any": [
+            "deprecated",
+            "maintained",
+            "packages/api/v1"
+          ]
+        },
+        {
+          "id": "documenso-folder-router",
+          "category": "api",
+          "question": "Where are folder API operations organized in API V2?",
+          "ground_truth": "Folder operations are organized in the current tRPC API under packages/trpc/server/folder-router.",
+          "expected_sources": [
+            "ARCHITECTURE.md",
+            "packages/trpc/server/folder-router"
+          ],
+          "must_include_any": [
+            "folder-router",
+            "packages/trpc/server",
+            "API V2"
+          ]
+        },
+        {
+          "id": "documenso-template-router",
+          "category": "api",
+          "question": "Where are template API operations grouped in the current API architecture?",
+          "ground_truth": "Template operations are grouped under the current tRPC server's template-router, as part of API V2.",
+          "expected_sources": [
+            "ARCHITECTURE.md",
+            "packages/trpc/server/template-router"
+          ],
+          "must_include_any": [
+            "template-router",
+            "API V2",
+            "tRPC"
+          ]
+        },
+        {
+          "id": "documenso-public-analytics-api",
+          "category": "architecture",
+          "question": "Which application in the monorepo is identified as the public analytics API?",
+          "ground_truth": "The monorepo architecture identifies apps/openpage-api as the public analytics API application.",
+          "expected_sources": [
+            "ARCHITECTURE.md",
+            "apps/openpage-api"
+          ],
+          "must_include_any": [
+            "openpage-api",
+            "analytics",
+            "public"
+          ]
+        },
+        {
+          "id": "documenso-enterprise-package",
+          "category": "architecture",
+          "question": "Where are Enterprise Edition features grouped in the monorepo?",
+          "ground_truth": "Enterprise Edition features are grouped in the packages/ee package.",
+          "expected_sources": [
+            "ARCHITECTURE.md",
+            "packages/ee"
+          ],
+          "must_include_any": [
+            "packages/ee",
+            "Enterprise Edition"
+          ]
+        },
+        {
+          "id": "documenso-job-and-email-handoff",
+          "category": "cross-file",
+          "question": "At an architectural level, how can background jobs and email delivery be located as separate concerns?",
+          "ground_truth": "Background job definitions are grouped under packages/lib/jobs, while email templates and mail delivery are grouped under packages/email. A particular workflow's handler establishes whether and how they call one another.",
+          "expected_sources": [
+            "ARCHITECTURE.md",
+            "packages/lib/jobs",
+            "packages/email"
+          ],
+          "must_include_any": [
+            "packages/lib/jobs",
+            "packages/email",
+            "handler"
+          ]
+        },
+        {
+          "id": "documenso-self-hosting-config-doc",
+          "category": "config-setup",
+          "question": "Where is the detailed self-hosted environment-variable reference documented?",
+          "ground_truth": "The self-hosting environment reference is in the documentation under apps/docs/content/docs/self-hosting/configuration/environment.mdx, alongside the repository's .env.example.",
+          "expected_sources": [
+            "apps/docs/content/docs/self-hosting/configuration/environment.mdx",
+            ".env.example"
+          ],
+          "must_include_any": [
+            "environment.mdx",
+            ".env.example",
+            "self-hosting"
+          ]
+        },
+        {
+          "id": "documenso-followup-api-route",
+          "category": "conversation",
+          "turns": [
+            {
+              "role": "user",
+              "content": "Where is Documenso's current API V2 implemented?"
+            },
+            {
+              "role": "assistant",
+              "content": "It is implemented with tRPC under packages/trpc/server and exposed by the Remix server."
+            }
+          ],
+          "question": "where does the document-specific part live?",
+          "ground_truth": "The document-specific procedures live in packages/trpc/server/document-router, within the current tRPC API V2 implementation.",
+          "expected_sources": [
+            "packages/trpc/server/document-router",
+            "ARCHITECTURE.md"
+          ],
+          "must_include_any": [
+            "document-router",
+            "tRPC",
+            "API V2"
+          ]
+        }
       ]
     },
     {
@@ -148,6 +644,513 @@
           "expected_sources": ["fastapi/encoders.py", "tests"],
           "must_include_any": ["jsonable_encoder", "encoders.py", "tests"]
         }
+      ,
+        {
+          "id": "fastapi-sync-async-dependencies",
+          "category": "implementation",
+          "question": "How does FastAPI run synchronous and asynchronous dependency callables?",
+          "ground_truth": "FastAPI inspects whether a dependency is async and runs it accordingly; synchronous callables are sent through the thread pool while async callables are awaited.",
+          "expected_sources": [
+            "fastapi/dependencies/utils.py",
+            "fastapi/concurrency.py"
+          ],
+          "must_include_any": [
+            "thread pool",
+            "await",
+            "dependency"
+          ]
+        },
+        {
+          "id": "fastapi-lifespan",
+          "category": "architecture",
+          "question": "How does FastAPI run setup and cleanup code around an application lifespan?",
+          "ground_truth": "A lifespan context manager passed to the FastAPI application runs setup before yield and cleanup after yield during shutdown.",
+          "expected_sources": [
+            "fastapi/applications.py",
+            "docs/en/docs/advanced/events.md"
+          ],
+          "must_include_any": [
+            "lifespan",
+            "startup",
+            "shutdown"
+          ]
+        },
+        {
+          "id": "fastapi-middleware-registration",
+          "category": "architecture",
+          "question": "Where does FastAPI expose middleware registration, and what does middleware wrap?",
+          "ground_truth": "FastAPI exposes middleware registration through its application API. Middleware wraps request and response processing; the middleware guide describes registration and ordering.",
+          "expected_sources": [
+            "fastapi/applications.py",
+            "docs/en/docs/advanced/middleware.md"
+          ],
+          "must_include_any": [
+            "middleware",
+            "add_middleware",
+            "request"
+          ]
+        },
+        {
+          "id": "fastapi-include-router",
+          "category": "cross-file",
+          "question": "How does an APIRouter become part of a FastAPI application?",
+          "ground_truth": "An APIRouter groups path operations; including it on the application adds its routes and combines router configuration with the application.",
+          "expected_sources": [
+            "fastapi/applications.py",
+            "fastapi/routing.py",
+            "docs/en/docs/tutorial/bigger-applications.md"
+          ],
+          "must_include_any": [
+            "include_router",
+            "APIRouter",
+            "routes"
+          ]
+        },
+        {
+          "id": "fastapi-apiroute-request-handler",
+          "category": "specific-function",
+          "question": "What work does APIRoute perform when handling a request?",
+          "ground_truth": "APIRoute builds a path-operation request handler that coordinates body parsing and validation, dependency solving, endpoint execution, and response serialization.",
+          "expected_sources": [
+            "fastapi/routing.py"
+          ],
+          "must_include_any": [
+            "APIRoute",
+            "request handler",
+            "response"
+          ]
+        },
+        {
+          "id": "fastapi-dependency-tree",
+          "category": "cross-file",
+          "question": "How does FastAPI turn Depends declarations into dependencies to solve for a request?",
+          "ground_truth": "Depends is represented by parameter metadata, dependency analysis builds a dependency graph, and request-time solving resolves its nodes before calling the path operation. Routing invokes dependency utilities.",
+          "expected_sources": [
+            "fastapi/params.py",
+            "fastapi/param_functions.py",
+            "fastapi/dependencies/utils.py",
+            "fastapi/routing.py"
+          ],
+          "must_include_any": [
+            "Depends",
+            "dependency graph",
+            "solve_dependencies"
+          ]
+        },
+        {
+          "id": "fastapi-yield-dependencies",
+          "category": "implementation",
+          "question": "How are dependencies that use yield cleaned up after a request?",
+          "ground_truth": "FastAPI supports yield dependencies by entering their context and scheduling post-yield cleanup in request handling. Dependency utilities contain the context-manager and exit-stack logic.",
+          "expected_sources": [
+            "fastapi/dependencies/utils.py",
+            "docs/en/docs/tutorial/dependencies/dependencies-with-yield.md"
+          ],
+          "must_include_any": [
+            "yield",
+            "cleanup",
+            "dependencies/utils.py"
+          ]
+        },
+        {
+          "id": "fastapi-dependency-overrides",
+          "category": "testing",
+          "question": "How can a test replace an application dependency without calling the original dependency?",
+          "ground_truth": "Tests can set app.dependency_overrides, mapping the original dependency callable to a replacement. FastAPI uses the replacement during dependency solving; the guide shows how to clear overrides.",
+          "expected_sources": [
+            "fastapi/dependencies/utils.py",
+            "docs/en/docs/advanced/testing-dependencies.md"
+          ],
+          "must_include_any": [
+            "dependency_overrides",
+            "override",
+            "testing"
+          ]
+        },
+        {
+          "id": "fastapi-response-model",
+          "category": "specific-function",
+          "question": "What does a response_model do to a path operation result?",
+          "ground_truth": "A response model declares the output shape. FastAPI validates and serializes the returned value against it and uses it in the generated schema.",
+          "expected_sources": [
+            "fastapi/routing.py",
+            "docs/en/docs/tutorial/response-model.md"
+          ],
+          "must_include_any": [
+            "response model",
+            "validate",
+            "serialize"
+          ]
+        },
+        {
+          "id": "fastapi-response-serialization",
+          "category": "cross-file",
+          "question": "Where does FastAPI handle response validation and JSON response serialization?",
+          "ground_truth": "Path-operation routing prepares and validates response data, then serializes it into the configured response. The routing module coordinates the response field and response class behavior.",
+          "expected_sources": [
+            "fastapi/routing.py",
+            "fastapi/encoders.py"
+          ],
+          "must_include_any": [
+            "response",
+            "serialize",
+            "jsonable_encoder"
+          ]
+        },
+        {
+          "id": "fastapi-jsonable-encoder-datatypes",
+          "category": "implementation",
+          "question": "What kinds of values is jsonable_encoder intended to convert?",
+          "ground_truth": "jsonable_encoder converts supported Python and Pydantic values into JSON-compatible data, handling models, collections, dates, and configured encoders.",
+          "expected_sources": [
+            "fastapi/encoders.py",
+            "docs/en/docs/tutorial/encoder.md"
+          ],
+          "must_include_any": [
+            "jsonable_encoder",
+            "JSON-compatible",
+            "encoders.py"
+          ]
+        },
+        {
+          "id": "fastapi-openapi-route-input",
+          "category": "cross-file",
+          "question": "How do registered routes and their metadata contribute to FastAPI OpenAPI generation?",
+          "ground_truth": "OpenAPI utilities inspect application routes and path-operation metadata, then assemble operations, parameters, request bodies, responses, and component schemas.",
+          "expected_sources": [
+            "fastapi/openapi/utils.py",
+            "fastapi/applications.py"
+          ],
+          "must_include_any": [
+            "OpenAPI",
+            "routes",
+            "schema"
+          ]
+        },
+        {
+          "id": "fastapi-docs-endpoints",
+          "category": "api",
+          "question": "Where are the Swagger UI and ReDoc HTML helpers implemented?",
+          "ground_truth": "FastAPI provides helpers for generating Swagger UI and ReDoc HTML in fastapi/openapi/docs.py; the application exposes interactive documentation endpoints using those helpers.",
+          "expected_sources": [
+            "fastapi/openapi/docs.py",
+            "fastapi/applications.py"
+          ],
+          "must_include_any": [
+            "Swagger UI",
+            "ReDoc",
+            "openapi/docs.py"
+          ]
+        },
+        {
+          "id": "fastapi-custom-openapi",
+          "category": "api",
+          "question": "How can an application customize or cache its generated OpenAPI schema?",
+          "ground_truth": "The FastAPI application exposes an openapi method and app.openapi_schema cache. Applications can override the method to customize schema generation while reusing the OpenAPI utilities.",
+          "expected_sources": [
+            "fastapi/applications.py",
+            "fastapi/openapi/utils.py",
+            "docs/en/docs/how-to/extending-openapi.md"
+          ],
+          "must_include_any": [
+            "openapi_schema",
+            "openapi",
+            "customize"
+          ]
+        },
+        {
+          "id": "fastapi-http-exception",
+          "category": "error-handling",
+          "question": "Where is HTTPException defined, and how does it request an HTTP error response?",
+          "ground_truth": "HTTPException is defined in FastAPI exceptions. Raising it from a path operation or dependency signals an HTTP error that exception handling converts into a response.",
+          "expected_sources": [
+            "fastapi/exceptions.py",
+            "fastapi/exception_handlers.py",
+            "docs/en/docs/tutorial/handling-errors.md"
+          ],
+          "must_include_any": [
+            "HTTPException",
+            "status_code",
+            "exception"
+          ]
+        },
+        {
+          "id": "fastapi-validation-error-response",
+          "category": "error-handling",
+          "question": "How does FastAPI turn request validation failures into an error response?",
+          "ground_truth": "FastAPI represents request validation failures with RequestValidationError and registers a default handler that returns a structured 422 response.",
+          "expected_sources": [
+            "fastapi/exceptions.py",
+            "fastapi/exception_handlers.py",
+            "fastapi/routing.py"
+          ],
+          "must_include_any": [
+            "RequestValidationError",
+            "422",
+            "exception handler"
+          ]
+        },
+        {
+          "id": "fastapi-custom-exception-handler",
+          "category": "error-handling",
+          "question": "How can an application register a handler for a custom exception?",
+          "ground_truth": "The application provides exception-handler registration, and FastAPI dispatches matching exceptions to the registered handler to produce a response.",
+          "expected_sources": [
+            "fastapi/applications.py",
+            "fastapi/exception_handlers.py",
+            "docs/en/docs/tutorial/handling-errors.md"
+          ],
+          "must_include_any": [
+            "exception_handler",
+            "handler",
+            "exception"
+          ]
+        },
+        {
+          "id": "fastapi-background-tasks",
+          "category": "implementation",
+          "question": "How are BackgroundTasks declared and run after a response is sent?",
+          "ground_truth": "A path operation or dependency can receive BackgroundTasks and add work to it. FastAPI carries the tasks into the response so Starlette can execute them after sending it.",
+          "expected_sources": [
+            "fastapi/background.py",
+            "fastapi/routing.py",
+            "docs/en/docs/tutorial/background-tasks.md"
+          ],
+          "must_include_any": [
+            "BackgroundTasks",
+            "after",
+            "response"
+          ]
+        },
+        {
+          "id": "fastapi-upload-file",
+          "category": "specific-function",
+          "question": "How does FastAPI represent an uploaded file parameter?",
+          "ground_truth": "FastAPI provides UploadFile for uploaded files, backed by Starlette, and parameter declarations use it to expose file metadata and content access.",
+          "expected_sources": [
+            "fastapi/datastructures.py",
+            "fastapi/param_functions.py",
+            "docs/en/docs/tutorial/request-files.md"
+          ],
+          "must_include_any": [
+            "UploadFile",
+            "upload",
+            "multipart"
+          ]
+        },
+        {
+          "id": "fastapi-form-file-parsing",
+          "category": "cross-file",
+          "question": "How does FastAPI distinguish form fields and uploaded files from JSON request bodies?",
+          "ground_truth": "FastAPI uses File and Form declarations for multipart/form-data inputs. Routing and dependency parsing read the form body and populate endpoint parameters.",
+          "expected_sources": [
+            "fastapi/params.py",
+            "fastapi/dependencies/utils.py",
+            "fastapi/routing.py",
+            "docs/en/docs/tutorial/request-forms-and-files.md"
+          ],
+          "must_include_any": [
+            "File",
+            "Form",
+            "multipart"
+          ]
+        },
+        {
+          "id": "fastapi-oauth2-password-bearer",
+          "category": "security",
+          "question": "Where is OAuth2PasswordBearer implemented and how does it obtain a bearer token?",
+          "ground_truth": "OAuth2PasswordBearer is a security dependency under fastapi/security. It reads the Authorization bearer token and contributes OAuth2 metadata to OpenAPI.",
+          "expected_sources": [
+            "fastapi/security/oauth2.py",
+            "fastapi/openapi/utils.py",
+            "docs/en/docs/tutorial/security/first-steps.md"
+          ],
+          "must_include_any": [
+            "OAuth2PasswordBearer",
+            "Bearer",
+            "security"
+          ]
+        },
+        {
+          "id": "fastapi-http-bearer",
+          "category": "security",
+          "question": "How does HTTPBearer parse an Authorization header and represent its result?",
+          "ground_truth": "HTTPBearer parses an Authorization header using the Bearer scheme and returns credentials containing the scheme and token.",
+          "expected_sources": [
+            "fastapi/security/http.py",
+            "fastapi/security/__init__.py"
+          ],
+          "must_include_any": [
+            "HTTPBearer",
+            "HTTPAuthorizationCredentials",
+            "Bearer"
+          ]
+        },
+        {
+          "id": "fastapi-security-scopes",
+          "category": "security",
+          "question": "How are OAuth2 scopes declared on a dependency and exposed in the API schema?",
+          "ground_truth": "FastAPI represents scopes through OAuth2 helpers and dependency declarations; OpenAPI generation collects required scopes and emits them in operation security requirements.",
+          "expected_sources": [
+            "fastapi/security/oauth2.py",
+            "fastapi/dependencies/utils.py",
+            "fastapi/openapi/utils.py"
+          ],
+          "must_include_any": [
+            "SecurityScopes",
+            "scopes",
+            "OpenAPI"
+          ]
+        },
+        {
+          "id": "fastapi-websocket-route",
+          "category": "implementation",
+          "question": "How does FastAPI register and execute a WebSocket endpoint?",
+          "ground_truth": "FastAPI provides WebSocket route support through its routing layer. A registered endpoint receives a WebSocket object and participates in the ASGI connection lifecycle.",
+          "expected_sources": [
+            "fastapi/routing.py",
+            "docs/en/docs/advanced/websockets.md"
+          ],
+          "must_include_any": [
+            "WebSocket",
+            "websocket route",
+            "ASGI"
+          ]
+        },
+        {
+          "id": "fastapi-request-body-validation",
+          "category": "cross-file",
+          "question": "How does a Pydantic model declared as a request body reach a path operation?",
+          "ground_truth": "FastAPI inspects endpoint parameters to build body fields, parses the incoming body, validates values using the declared model, and passes the result to the endpoint.",
+          "expected_sources": [
+            "fastapi/dependencies/utils.py",
+            "fastapi/routing.py",
+            "docs/en/docs/tutorial/body.md"
+          ],
+          "must_include_any": [
+            "body",
+            "Pydantic",
+            "endpoint"
+          ]
+        },
+        {
+          "id": "fastapi-path-query-body",
+          "category": "specific-function",
+          "question": "How does FastAPI identify whether a parameter comes from the path, query string, or body?",
+          "ground_truth": "FastAPI inspects the path template and endpoint parameter annotations/defaults to infer or apply metadata such as Path, Query, and Body.",
+          "expected_sources": [
+            "fastapi/params.py",
+            "fastapi/param_functions.py",
+            "fastapi/dependencies/utils.py"
+          ],
+          "must_include_any": [
+            "Path",
+            "Query",
+            "Body"
+          ]
+        },
+        {
+          "id": "fastapi-router-dependencies",
+          "category": "cross-file",
+          "question": "Can dependencies be applied to every operation in an APIRouter?",
+          "ground_truth": "Yes. APIRouter accepts shared dependencies, which are included when its path operations are registered and later solved for requests.",
+          "expected_sources": [
+            "fastapi/routing.py",
+            "docs/en/docs/tutorial/bigger-applications.md"
+          ],
+          "must_include_any": [
+            "APIRouter",
+            "dependencies",
+            "include_router"
+          ]
+        },
+        {
+          "id": "fastapi-response-headers-cookies",
+          "category": "implementation",
+          "question": "How can a path operation set response headers or cookies through FastAPI?",
+          "ground_truth": "A path operation can receive a Response object and modify its headers or cookies; routing uses those values when constructing the final response.",
+          "expected_sources": [
+            "fastapi/responses.py",
+            "fastapi/routing.py",
+            "docs/en/docs/advanced/response-headers.md"
+          ],
+          "must_include_any": [
+            "Response",
+            "headers",
+            "cookies"
+          ]
+        },
+        {
+          "id": "fastapi-status-codes",
+          "category": "api",
+          "question": "How does a path operation declare its success status code?",
+          "ground_truth": "A path operation decorator accepts status_code, which is used for response behavior and included in generated OpenAPI metadata.",
+          "expected_sources": [
+            "fastapi/applications.py",
+            "fastapi/routing.py",
+            "docs/en/docs/tutorial/response-status-code.md"
+          ],
+          "must_include_any": [
+            "status_code",
+            "OpenAPI",
+            "response"
+          ]
+        },
+        {
+          "id": "fastapi-testclient",
+          "category": "testing",
+          "question": "What client does FastAPI recommend for testing an application in-process?",
+          "ground_truth": "FastAPI documents using Starlette TestClient to call an application in tests without a separate server; pytest commonly runs the tests.",
+          "expected_sources": [
+            "docs/en/docs/tutorial/testing.md",
+            "tests"
+          ],
+          "must_include_any": [
+            "TestClient",
+            "pytest",
+            "testing"
+          ]
+        },
+        {
+          "id": "fastapi-dependency-security-followup",
+          "category": "conversation",
+          "question": "Where does the bearer-token dependency connect to OpenAPI security documentation?",
+          "ground_truth": "HTTPBearer in fastapi/security/http.py connects to OpenAPI utilities that inspect security dependencies and emit the scheme and operation requirements.",
+          "expected_sources": [
+            "fastapi/security/http.py",
+            "fastapi/openapi/utils.py"
+          ],
+          "must_include_any": [
+            "HTTPBearer",
+            "OpenAPI",
+            "security"
+          ]
+        },
+        {
+          "id": "fastapi-followup-lifespan",
+          "category": "conversation",
+          "question": "How does that lifespan hook get exposed to the application constructor?",
+          "ground_truth": "FastAPI accepts a lifespan context manager in its constructor; the inherited Starlette lifecycle invokes it around startup and shutdown.",
+          "expected_sources": [
+            "fastapi/applications.py",
+            "docs/en/docs/advanced/events.md"
+          ],
+          "must_include_any": [
+            "lifespan",
+            "FastAPI",
+            "shutdown"
+          ],
+          "turns": [
+            {
+              "role": "user",
+              "content": "How can setup and cleanup code run around a FastAPI application lifecycle?"
+            },
+            {
+              "role": "assistant",
+              "content": "FastAPI supports a lifespan context manager whose pre-yield and post-yield sections run during startup and shutdown."
+            }
+          ]
+        }
       ]
     },
     {
@@ -222,6 +1225,491 @@
           "ground_truth": "Django's built-in template engine is implemented under django/template, including engine configuration, parsing, loading, and rendering machinery.",
           "expected_sources": ["django/template", "django/template/engine.py", "django/template/base.py"],
           "must_include_any": ["django/template", "Engine", "Template", "render"]
+        }
+      ,
+        {
+          "id": "django-wsgi-entrypoint",
+          "category": "implementation",
+          "question": "Where is Django WSGIHandler implemented, and what does it adapt?",
+          "ground_truth": "Django implements its WSGI application handler in django/core/handlers/wsgi.py. It adapts the WSGI environment into Django request handling and returns a WSGI-compatible response.",
+          "expected_sources": [
+            "django/core/handlers/wsgi.py",
+            "django/core/handlers/base.py"
+          ],
+          "must_include_any": [
+            "WSGIHandler",
+            "wsgi.py",
+            "request"
+          ]
+        },
+        {
+          "id": "django-asgi-entrypoint",
+          "category": "implementation",
+          "question": "Where does Django implement its ASGI HTTP handler?",
+          "ground_truth": "Django ASGIHandler is implemented in django/core/handlers/asgi.py and adapts ASGI scope and receive/send messages into Django request-response processing.",
+          "expected_sources": [
+            "django/core/handlers/asgi.py",
+            "django/core/handlers/base.py"
+          ],
+          "must_include_any": [
+            "ASGIHandler",
+            "ASGI",
+            "asgi.py"
+          ]
+        },
+        {
+          "id": "django-base-handler-lifecycle",
+          "category": "cross-file",
+          "question": "How does Django's base handler process a request through middleware and dispatch it?",
+          "ground_truth": "The base handler loads middleware, builds the middleware chain, and handles request processing that resolves and invokes the view before returning a response. WSGI and ASGI handlers adapt their protocols into that shared behavior.",
+          "expected_sources": [
+            "django/core/handlers/base.py",
+            "django/core/handlers/wsgi.py",
+            "django/core/handlers/asgi.py"
+          ],
+          "must_include_any": [
+            "BaseHandler",
+            "middleware",
+            "view"
+          ]
+        },
+        {
+          "id": "django-exception-conversion",
+          "category": "error-handling",
+          "question": "Where does Django convert exceptions raised during request handling into HTTP responses?",
+          "ground_truth": "Django core handler exception utilities convert exceptions into appropriate responses, with middleware wrappers and the base handler applying that conversion during request processing.",
+          "expected_sources": [
+            "django/core/handlers/exception.py",
+            "django/core/handlers/base.py"
+          ],
+          "must_include_any": [
+            "convert_exception_to_response",
+            "exception",
+            "response"
+          ]
+        },
+        {
+          "id": "django-url-resolver-lookup",
+          "category": "specific-function",
+          "question": "How does Django resolve a URL path to a view callable?",
+          "ground_truth": "Django URL resolution walks configured patterns, matches path components and converters, and returns a ResolverMatch containing the selected view and route information.",
+          "expected_sources": [
+            "django/urls/resolvers.py",
+            "django/urls/base.py"
+          ],
+          "must_include_any": [
+            "ResolverMatch",
+            "URLResolver",
+            "view"
+          ]
+        },
+        {
+          "id": "django-path-converters",
+          "category": "specific-function",
+          "question": "Where are Django path converters defined and what do they do?",
+          "ground_truth": "Built-in path converters are implemented in django/urls/converters.py. They convert matched URL text to typed values and provide a regular expression for route matching.",
+          "expected_sources": [
+            "django/urls/converters.py",
+            "django/urls/resolvers.py"
+          ],
+          "must_include_any": [
+            "converters.py",
+            "to_python",
+            "regex"
+          ]
+        },
+        {
+          "id": "django-include-urlconfs",
+          "category": "cross-file",
+          "question": "How does Django include another URLconf beneath a path prefix?",
+          "ground_truth": "The include helper returns URLconf configuration that the resolver incorporates beneath the parent pattern, allowing a project to delegate a path prefix to an application URLconf.",
+          "expected_sources": [
+            "django/urls/conf.py",
+            "django/urls/resolvers.py"
+          ],
+          "must_include_any": [
+            "include",
+            "URLconf",
+            "URLResolver"
+          ]
+        },
+        {
+          "id": "django-queryset-laziness",
+          "category": "specific-function",
+          "question": "Why can a Django QuerySet be chained without immediately querying the database?",
+          "ground_truth": "QuerySets are lazy: filters and other operations return or clone a query representation, and database evaluation is deferred until results are requested or the queryset is otherwise evaluated.",
+          "expected_sources": [
+            "django/db/models/query.py"
+          ],
+          "must_include_any": [
+            "QuerySet",
+            "lazy",
+            "database"
+          ]
+        },
+        {
+          "id": "django-queryset-filter",
+          "category": "specific-function",
+          "question": "Where is QuerySet.filter implemented, and how does it add conditions?",
+          "ground_truth": "QuerySet.filter is implemented in django/db/models/query.py. It returns a queryset with additional lookup conditions applied to its underlying query rather than directly returning database rows.",
+          "expected_sources": [
+            "django/db/models/query.py",
+            "django/db/models/sql/query.py"
+          ],
+          "must_include_any": [
+            "QuerySet",
+            "filter",
+            "query.py"
+          ]
+        },
+        {
+          "id": "django-q-object-composition",
+          "category": "specific-function",
+          "question": "What is a Q object used for in Django ORM queries?",
+          "ground_truth": "Q objects represent composable query conditions and allow OR, AND, and negation combinations in lookups. QuerySet filtering and the ORM query layer consume these expressions.",
+          "expected_sources": [
+            "django/db/models/query_utils.py",
+            "django/db/models/sql/query.py"
+          ],
+          "must_include_any": [
+            "Q object",
+            "OR",
+            "query condition"
+          ]
+        },
+        {
+          "id": "django-model-manager",
+          "category": "specific-function",
+          "question": "What is the role of a model manager, and where is its base class implemented?",
+          "ground_truth": "A model manager is the interface through which a model exposes queryset operations. Its base implementation is in django/db/models/manager.py and it creates or delegates to querysets.",
+          "expected_sources": [
+            "django/db/models/manager.py",
+            "django/db/models/query.py"
+          ],
+          "must_include_any": [
+            "Manager",
+            "QuerySet",
+            "manager.py"
+          ]
+        },
+        {
+          "id": "django-model-options-metadata",
+          "category": "implementation",
+          "question": "Where does Django collect model metadata such as fields and table configuration?",
+          "ground_truth": "Django model Options metadata is implemented in django/db/models/options.py and holds model configuration used by the ORM, including fields and database table metadata.",
+          "expected_sources": [
+            "django/db/models/options.py",
+            "django/db/models/base.py"
+          ],
+          "must_include_any": [
+            "Options",
+            "model metadata",
+            "fields"
+          ]
+        },
+        {
+          "id": "django-app-registry",
+          "category": "architecture",
+          "question": "How does Django app registry locate installed applications and models?",
+          "ground_truth": "The app registry tracks application configurations and registered models; its population process loads app configurations and model modules from INSTALLED_APPS.",
+          "expected_sources": [
+            "django/apps/registry.py",
+            "django/apps/config.py"
+          ],
+          "must_include_any": [
+            "Apps",
+            "INSTALLED_APPS",
+            "models"
+          ]
+        },
+        {
+          "id": "django-settings-lazy-object",
+          "category": "config-setup",
+          "question": "How does django.conf.settings defer loading the project settings module?",
+          "ground_truth": "django.conf.settings is a lazy proxy. On first access it initializes settings from DJANGO_SETTINGS_MODULE, then exposes configured and default settings to callers.",
+          "expected_sources": [
+            "django/conf/__init__.py"
+          ],
+          "must_include_any": [
+            "LazySettings",
+            "DJANGO_SETTINGS_MODULE",
+            "settings"
+          ]
+        },
+        {
+          "id": "django-middleware-order",
+          "category": "cross-file",
+          "question": "How does Django use MIDDLEWARE ordering when building its request-response chain?",
+          "ground_truth": "The base handler loads middleware in configured order and wraps the handler chain; request and response processing order follows the nesting of those callables.",
+          "expected_sources": [
+            "django/core/handlers/base.py"
+          ],
+          "must_include_any": [
+            "MIDDLEWARE",
+            "middleware chain",
+            "order"
+          ]
+        },
+        {
+          "id": "django-httpresponse-base",
+          "category": "specific-function",
+          "question": "Where is Django base HttpResponse implemented?",
+          "ground_truth": "HttpResponseBase and response classes are implemented in django/http/response.py, which provides status, headers, and response content handling.",
+          "expected_sources": [
+            "django/http/response.py"
+          ],
+          "must_include_any": [
+            "HttpResponseBase",
+            "HttpResponse",
+            "response.py"
+          ]
+        },
+        {
+          "id": "django-streaming-response",
+          "category": "specific-function",
+          "question": "How does Django represent a response whose body is streamed as an iterator?",
+          "ground_truth": "StreamingHttpResponse is implemented in django/http/response.py and stores an iterable response body for streaming rather than eagerly joining the full content into a normal response body.",
+          "expected_sources": [
+            "django/http/response.py"
+          ],
+          "must_include_any": [
+            "StreamingHttpResponse",
+            "streaming",
+            "iterator"
+          ]
+        },
+        {
+          "id": "django-csrf-origin-check",
+          "category": "security",
+          "question": "What request properties does Django CSRF middleware check in addition to the token?",
+          "ground_truth": "CSRF middleware validates the token and, where applicable, checks request Origin or Referer against trusted origins and the request host to mitigate cross-origin forgery.",
+          "expected_sources": [
+            "django/middleware/csrf.py"
+          ],
+          "must_include_any": [
+            "Origin",
+            "Referer",
+            "CSRF"
+          ]
+        },
+        {
+          "id": "django-authentication-middleware",
+          "category": "security",
+          "question": "What does AuthenticationMiddleware add to each Django request?",
+          "ground_truth": "AuthenticationMiddleware associates the session with a lazy request.user value, making the authenticated user available to downstream views when session middleware has run first.",
+          "expected_sources": [
+            "django/contrib/auth/middleware.py",
+            "django/contrib/sessions/middleware.py"
+          ],
+          "must_include_any": [
+            "request.user",
+            "AuthenticationMiddleware",
+            "session"
+          ]
+        },
+        {
+          "id": "django-session-middleware",
+          "category": "implementation",
+          "question": "How does SessionMiddleware attach session state to a request and persist it on the response?",
+          "ground_truth": "SessionMiddleware loads a session for the request and saves or expires it while processing the response, using the configured session engine and cookie settings.",
+          "expected_sources": [
+            "django/contrib/sessions/middleware.py",
+            "django/contrib/sessions/backends/base.py"
+          ],
+          "must_include_any": [
+            "SessionMiddleware",
+            "session",
+            "cookie"
+          ]
+        },
+        {
+          "id": "django-admin-site-registration",
+          "category": "specific-function",
+          "question": "Where is the Django admin site registry implemented, and what does it register?",
+          "ground_truth": "AdminSite is implemented in django/contrib/admin/sites.py. It registers model admin classes and builds the admin model views and URL patterns.",
+          "expected_sources": [
+            "django/contrib/admin/sites.py"
+          ],
+          "must_include_any": [
+            "AdminSite",
+            "register",
+            "admin"
+          ]
+        },
+        {
+          "id": "django-form-validation-flow",
+          "category": "cross-file",
+          "question": "How does a Django form validate submitted data and expose cleaned values?",
+          "ground_truth": "Form validation runs through is_valid and full_clean, populating errors or cleaned_data after field and form-level cleaning.",
+          "expected_sources": [
+            "django/forms/forms.py",
+            "django/forms/fields.py"
+          ],
+          "must_include_any": [
+            "is_valid",
+            "full_clean",
+            "cleaned_data"
+          ]
+        },
+        {
+          "id": "django-model-validation",
+          "category": "error-handling",
+          "question": "How does Django validate a model instance before saving when full_clean is called?",
+          "ground_truth": "Model.full_clean coordinates field validation, model.clean, uniqueness checks, and constraint validation, collecting validation errors before persistence.",
+          "expected_sources": [
+            "django/db/models/base.py",
+            "django/db/models/constraints.py"
+          ],
+          "must_include_any": [
+            "full_clean",
+            "model.clean",
+            "ValidationError"
+          ]
+        },
+        {
+          "id": "django-template-engine",
+          "category": "specific-function",
+          "question": "How does Django Engine connect template loaders to template rendering?",
+          "ground_truth": "The built-in Engine configures template loaders and creates Template objects; template parsing and rendering are implemented by the engine and base template modules.",
+          "expected_sources": [
+            "django/template/engine.py",
+            "django/template/base.py",
+            "django/template/loader.py"
+          ],
+          "must_include_any": [
+            "Engine",
+            "Template",
+            "loader"
+          ]
+        },
+        {
+          "id": "django-template-context",
+          "category": "specific-function",
+          "question": "What does Django Context provide while rendering a template?",
+          "ground_truth": "Context stores variables available during rendering and supports nested context levels so temporary values can be pushed and popped.",
+          "expected_sources": [
+            "django/template/context.py",
+            "django/template/base.py"
+          ],
+          "must_include_any": [
+            "Context",
+            "push",
+            "render"
+          ]
+        },
+        {
+          "id": "django-template-loader-selection",
+          "category": "specific-function",
+          "question": "How does Django locate a named template using configured template backends?",
+          "ground_truth": "Template loader helpers ask configured engines to locate and load a named template, returning a Template or raising a template-not-found error.",
+          "expected_sources": [
+            "django/template/loader.py",
+            "django/template/engine.py",
+            "django/template/loaders"
+          ],
+          "must_include_any": [
+            "get_template",
+            "Engine",
+            "loader"
+          ]
+        },
+        {
+          "id": "django-cache-framework",
+          "category": "config-setup",
+          "question": "Where does Django expose configured cache backends to application code?",
+          "ground_truth": "Django cache framework exposes configured backends through django.core.cache, using cache handler and backend classes to select and access configured cache aliases.",
+          "expected_sources": [
+            "django/core/cache"
+          ],
+          "must_include_any": [
+            "cache",
+            "cache backend",
+            "CACHES"
+          ]
+        },
+        {
+          "id": "django-signals-dispatch",
+          "category": "implementation",
+          "question": "Where does Django implement signal connection and dispatch?",
+          "ground_truth": "Django signal behavior is implemented in django/dispatch/dispatcher.py. Signal instances maintain receivers and send notifications to connected callables.",
+          "expected_sources": [
+            "django/dispatch/dispatcher.py"
+          ],
+          "must_include_any": [
+            "Signal",
+            "receiver",
+            "dispatch"
+          ]
+        },
+        {
+          "id": "django-migrations-operations",
+          "category": "config-setup",
+          "question": "Where are Django migration operations represented and applied?",
+          "ground_truth": "Migration operation classes live in django/db/migrations/operations and describe schema or data changes applied through a database schema editor.",
+          "expected_sources": [
+            "django/db/migrations/operations",
+            "django/db/migrations/executor.py"
+          ],
+          "must_include_any": [
+            "operations",
+            "migration",
+            "schema editor"
+          ]
+        },
+        {
+          "id": "django-test-runner",
+          "category": "tests",
+          "question": "Which module implements Django test runner and where are the main framework tests?",
+          "ground_truth": "DiscoverRunner is implemented in django/test/runner.py and discovers and executes tests; the repository main framework tests live in tests/.",
+          "expected_sources": [
+            "django/test/runner.py",
+            "tests"
+          ],
+          "must_include_any": [
+            "DiscoverRunner",
+            "tests/",
+            "test runner"
+          ]
+        },
+        {
+          "id": "django-staticfiles-app",
+          "category": "implementation",
+          "question": "Where is Django staticfiles application implemented?",
+          "ground_truth": "Django staticfiles application and management behavior are grouped under django/contrib/staticfiles, including finders and storage integrations.",
+          "expected_sources": [
+            "django/contrib/staticfiles"
+          ],
+          "must_include_any": [
+            "staticfiles",
+            "finders",
+            "storage"
+          ]
+        },
+        {
+          "id": "django-followup-request-path",
+          "category": "conversation",
+          "question": "Which code adapts the web server protocol before the shared handler processes the request?",
+          "ground_truth": "For WSGI, Django uses WSGIHandler; for ASGI, it uses ASGIHandler. Both adapt protocol input to shared BaseHandler processing.",
+          "expected_sources": [
+            "django/core/handlers/wsgi.py",
+            "django/core/handlers/asgi.py",
+            "django/core/handlers/base.py"
+          ],
+          "must_include_any": [
+            "WSGIHandler",
+            "ASGIHandler",
+            "BaseHandler"
+          ],
+          "turns": [
+            {
+              "role": "user",
+              "content": "How does a request move through Django before reaching a view?"
+            },
+            {
+              "role": "assistant",
+              "content": "The server-specific handler adapts the request, then the shared base handler applies middleware and URL resolution before calling the view."
+            }
+          ]
         }
       ]
     }
